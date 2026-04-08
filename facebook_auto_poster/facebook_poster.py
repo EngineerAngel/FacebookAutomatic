@@ -185,21 +185,40 @@ class FacebookPoster:
 
             self.human_wait(0.5, 1.5)
 
-            submit_btn = wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//button[@type='submit']"))
-            )
-            submit_btn.click()
+            pass_input.send_keys(Keys.RETURN)
 
-            # Wait for redirect to home feed
+            # Esperar a que desaparezca la página de login
             wait.until(
-                lambda d: "/home" in d.current_url or "/?sk=h_nor" in d.current_url
+                lambda d: "/login" not in d.current_url
             )
+
+            self.human_wait(2, 4)
+
+            # Cerrar diálogo "Recordar contraseña" si aparece
+            try:
+                dismiss_btn = WebDriverWait(self.driver, 5).until(
+                    EC.element_to_be_clickable(
+                        (By.XPATH, "//div[@aria-label='Cerrar' or @aria-label='Close']")
+                    )
+                )
+                dismiss_btn.click()
+                self.logger.info("Diálogo 'Recordar contraseña' cerrado")
+            except Exception:
+                # Intentar con "Ahora no"
+                try:
+                    ahora_no = self.driver.find_element(
+                        By.XPATH, "//a[contains(text(),'Ahora no')] | //span[contains(text(),'Ahora no')]"
+                    )
+                    ahora_no.click()
+                    self.logger.info("Clic en 'Ahora no'")
+                except Exception:
+                    pass  # No apareció el diálogo, continuar
 
             self.human_wait(
                 self.config["wait_after_login_min"],
                 self.config["wait_after_login_max"],
             )
-            self.logger.info("Login successful for %s", self.account.name)
+            self.logger.info("Login exitoso para %s", self.account.name)
             return True
 
         except Exception:
@@ -252,35 +271,23 @@ class FacebookPoster:
 
                 wait = WebDriverWait(self.driver, 15)
 
-                # --- Open post composer -----------------------------------
-                try:
-                    create_btn = wait.until(
-                        EC.element_to_be_clickable(
-                            (By.XPATH, "//span[contains(text(),'Crear')]")
-                        )
+                # --- Abrir compositor: clic en "Escribe algo..." -----------
+                composer = wait.until(
+                    EC.element_to_be_clickable(
+                        (By.XPATH,
+                         "//span[contains(text(),'Escribe algo')] "
+                         "| //span[contains(text(),'Write something')] "
+                         "| //span[contains(text(),'¿Qué estás pensando')]")
                     )
-                except Exception:
-                    create_btn = wait.until(
-                        EC.element_to_be_clickable(
-                            (
-                                By.XPATH,
-                                "//div[@role='button']"
-                                "[contains(@aria-label,'publicación')]",
-                            )
-                        )
-                    )
-
-                create_btn.click()
+                )
+                composer.click()
                 self.human_wait(2, 4)
 
-                # --- Type into contenteditable ----------------------------
+                # --- Escribir en el editor del modal ----------------------
                 editor = wait.until(
                     EC.presence_of_element_located(
-                        (
-                            By.XPATH,
-                            "//div[@role='dialog']"
-                            "//div[@contenteditable='true']",
-                        )
+                        (By.XPATH,
+                         "//div[@role='dialog']//div[@contenteditable='true']")
                     )
                 )
                 editor.click()
