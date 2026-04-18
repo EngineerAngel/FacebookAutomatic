@@ -43,8 +43,9 @@ CONFIG: dict = {
     "implicit_wait": 10,
     "max_retries": 3,
     "text_variation_mode": True,
-    "post_hours_allowed": range(9, 23),
+    "post_hours_allowed": range(6, 23),
     "execution_mode": os.getenv("EXECUTION_MODE", "sequential").strip().lower(),
+    "api_port": int(os.getenv("API_PORT", "5000")),
 }
 
 

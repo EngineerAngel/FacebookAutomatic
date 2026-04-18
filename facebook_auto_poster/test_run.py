@@ -32,8 +32,16 @@ def main() -> None:
 
     logger.info("Cuentas disponibles: %s\n", ", ".join(a.name for a in accounts))
 
-    # Usar solo la primera cuenta
-    account = accounts[0]
+    # Seleccionar cuenta
+    print("Cuentas disponibles:")
+    for i, a in enumerate(accounts):
+        print(f"  {i + 1}. {a.name}")
+    choice = input("\nElige el número de cuenta: ").strip()
+    try:
+        account = accounts[int(choice) - 1]
+    except (ValueError, IndexError):
+        logger.error("Selección inválida.")
+        sys.exit(1)
     logger.info("Usando la cuenta: %s\n", account.name)
 
     # Leer texto desde anuncio.txt

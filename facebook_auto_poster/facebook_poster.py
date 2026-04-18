@@ -5,6 +5,7 @@ Each FacebookPoster instance is bound to a single AccountConfig and
 manages its own WebDriver, logger, and screenshots directory.
 """
 
+import json
 import logging
 import os
 import random
@@ -96,10 +97,36 @@ class FacebookPoster:
     # ------------------------------------------------------------------ #
     # WebDriver setup
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _kill_chrome() -> None:
+        """Cierra todos los procesos de Chrome para liberar el perfil."""
+        import subprocess
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "chrome.exe"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(2)  # dar tiempo a que libere el lock del perfil
+        except Exception:
+            pass
+
     def _build_driver(self) -> webdriver.Chrome:
         opts = Options()
 
-        # Anti-detection basics
+        # Perfil de Chrome persistente (evita CAPTCHAs)
+        chrome_profile = os.getenv("CHROME_PROFILE_PATH", "").strip()
+        if chrome_profile:
+            # Cerrar Chrome para que libere el lock del perfil antes de abrirlo
+            self._kill_chrome()
+            opts.add_argument(f"--user-data-dir={chrome_profile}")
+            profile_name = os.getenv("CHROME_PROFILE_NAME", "Default").strip()
+            opts.add_argument(f"--profile-directory={profile_name}")
+            self.logger.info(
+                "Usando perfil de Chrome: %s (%s)", chrome_profile, profile_name
+            )
+
+        # Anti-detección
         opts.add_argument(
             "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -116,7 +143,7 @@ class FacebookPoster:
             opts.add_argument("--headless=new")
 
         opts.add_argument("--disable-notifications")
-        opts.add_argument("--lang=es")  # match Spanish UI XPaths
+        opts.add_argument("--lang=es")
 
         # Service — prefer explicit path, then webdriver-manager, then PATH
         chromedriver_path = os.getenv("CHROMEDRIVER_PATH", "").strip()
@@ -158,13 +185,96 @@ class FacebookPoster:
         except Exception:
             self.logger.warning("Failed to save screenshot %s", path, exc_info=True)
 
+    def _attach_image(self, image_path: str, wait: WebDriverWait) -> None:
+        """Adjunta una imagen al compositor abierto usando el input file oculto."""
+        # Intentar clic en botón "Foto/vídeo" para revelar el input
+        try:
+            photo_btn = wait.until(
+                EC.element_to_be_clickable(
+                    (By.XPATH,
+                     "//div[@role='dialog']//div[@aria-label='Foto/vídeo' "
+                     "or @aria-label='Photo/video' "
+                     "or @aria-label='Foto/video']")
+                )
+            )
+            photo_btn.click()
+            self.human_wait(1, 2)
+        except Exception:
+            self.logger.debug("No se encontró botón Foto/video, buscando input file directo")
+
+        # Localizar input[type=file] dentro del dialog
+        file_input = wait.until(
+            EC.presence_of_element_located(
+                (By.XPATH, "//div[@role='dialog']//input[@type='file']")
+            )
+        )
+        file_input.send_keys(os.path.abspath(image_path))
+        self.logger.info("Imagen adjuntada: %s", image_path)
+        self.human_wait(3, 5)
+
+    def _cookie_path(self) -> Path:
+        cookies_dir = Path(__file__).resolve().parent / "cookies"
+        cookies_dir.mkdir(exist_ok=True)
+        return cookies_dir / f"{self.account.name}.json"
+
+    def _save_cookies(self) -> None:
+        path = self._cookie_path()
+        cookies = self.driver.get_cookies()
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cookies, f)
+        self.logger.info("Cookies guardadas: %s", path)
+
+    def _load_cookies(self) -> bool:
+        """Carga cookies guardadas. Devuelve True si las encontró y cargó."""
+        path = self._cookie_path()
+        if not path.exists():
+            return False
+        # Las cookies solo se pueden inyectar estando en el dominio
+        self.driver.get("https://www.facebook.com/")
+        self.human_wait(1, 2)
+        with open(path, "r", encoding="utf-8") as f:
+            cookies = json.load(f)
+        for cookie in cookies:
+            # Selenium rechaza cookies con campos extra de algunos navegadores
+            cookie.pop("sameSite", None)
+            try:
+                self.driver.add_cookie(cookie)
+            except Exception:
+                pass
+        self.logger.info("Cookies cargadas desde %s", path)
+        return True
+
+    def _is_logged_in(self) -> bool:
+        """Comprueba si la sesión está activa buscando elementos del feed."""
+        try:
+            WebDriverWait(self.driver, 8).until(
+                EC.presence_of_element_located(
+                    (By.XPATH, "//div[@role='navigation']")
+                )
+            )
+            return "/login" not in self.driver.current_url
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------ #
     # Login
     # ------------------------------------------------------------------ #
     def login(self) -> bool:
-        """Log into Facebook. Returns True on success."""
-        self.logger.info("Logging in as %s …", self.account.name)
+        """Inicia sesión en Facebook. Primero intenta con cookies guardadas."""
+        self.logger.info("Iniciando sesión como %s …", self.account.name)
         try:
+            # --- Intentar con cookies guardadas --------------------------
+            if self._load_cookies():
+                self.driver.refresh()
+                self.human_wait(2, 4)
+                if self._is_logged_in():
+                    self.logger.info(
+                        "Sesión restaurada desde cookies para %s", self.account.name
+                    )
+                    return True
+                self.logger.info("Cookies expiradas, haciendo login normal …")
+
+            # --- Login normal --------------------------------------------
             self.driver.get("https://www.facebook.com/login")
             wait = WebDriverWait(self.driver, 20)
 
@@ -184,47 +294,37 @@ class FacebookPoster:
             pass_input.send_keys(self.account.password)
 
             self.human_wait(0.5, 1.5)
-
             pass_input.send_keys(Keys.RETURN)
 
-            # Esperar a que desaparezca la página de login
-            wait.until(
-                lambda d: "/login" not in d.current_url
-            )
-
+            wait.until(lambda d: "/login" not in d.current_url)
             self.human_wait(2, 4)
 
             # Cerrar diálogo "Recordar contraseña" si aparece
-            try:
-                dismiss_btn = WebDriverWait(self.driver, 5).until(
-                    EC.element_to_be_clickable(
-                        (By.XPATH, "//div[@aria-label='Cerrar' or @aria-label='Close']")
-                    )
-                )
-                dismiss_btn.click()
-                self.logger.info("Diálogo 'Recordar contraseña' cerrado")
-            except Exception:
-                # Intentar con "Ahora no"
+            for xpath in [
+                "//div[@aria-label='Cerrar']",
+                "//div[@aria-label='Close']",
+                "//span[contains(text(),'Ahora no')]",
+                "//a[contains(text(),'Ahora no')]",
+            ]:
                 try:
-                    ahora_no = self.driver.find_element(
-                        By.XPATH, "//a[contains(text(),'Ahora no')] | //span[contains(text(),'Ahora no')]"
-                    )
-                    ahora_no.click()
-                    self.logger.info("Clic en 'Ahora no'")
+                    self.driver.find_element(By.XPATH, xpath).click()
+                    break
                 except Exception:
-                    pass  # No apareció el diálogo, continuar
+                    pass
 
             self.human_wait(
                 self.config["wait_after_login_min"],
                 self.config["wait_after_login_max"],
             )
+
+            # Guardar cookies para la próxima ejecución
+            self._save_cookies()
+
             self.logger.info("Login exitoso para %s", self.account.name)
             return True
 
         except Exception:
-            self.logger.error(
-                "Login FAILED for %s", self.account.name, exc_info=True
-            )
+            self.logger.error("Login FAILED for %s", self.account.name, exc_info=True)
             self._screenshot("login_error.png")
             return False
 
@@ -255,8 +355,8 @@ class FacebookPoster:
     # ------------------------------------------------------------------ #
     # Publish
     # ------------------------------------------------------------------ #
-    def publish(self, group_id: str, text: str) -> bool:
-        """Post *text* to a single group. Returns True on success."""
+    def publish(self, group_id: str, text: str, image_path: str | None = None) -> bool:
+        """Post *text* (y opcionalmente imagen) to a single group. Returns True on success."""
 
         for attempt in range(1, self.config["max_retries"] + 1):
             self.logger.info(
@@ -294,6 +394,10 @@ class FacebookPoster:
                 self.human_wait(0.5, 1)
                 editor.send_keys(text)
                 self.human_wait(1, 2)
+
+                # --- Adjuntar imagen si se proporcionó --------------------
+                if image_path:
+                    self._attach_image(image_path, wait)
 
                 # --- Click Publicar (submit) ------------------------------
                 try:
@@ -344,7 +448,7 @@ class FacebookPoster:
     # ------------------------------------------------------------------ #
     # Publish to all groups
     # ------------------------------------------------------------------ #
-    def publish_to_all_groups(self, text: str) -> dict[str, bool]:
+    def publish_to_all_groups(self, text: str, image_path: str | None = None) -> dict[str, bool]:
         """Post to every group assigned to this account.
 
         Returns a dict mapping group_id -> success boolean.
@@ -359,7 +463,7 @@ class FacebookPoster:
         groups = self.account.groups[: self.config["max_groups_per_session"]]
 
         for idx, group_id in enumerate(groups):
-            success = self.publish(group_id, text)
+            success = self.publish(group_id, text, image_path=image_path)
             results[group_id] = success
 
             # Wait between groups, but not after the last one

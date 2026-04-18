@@ -27,6 +27,7 @@ def _worker(
     config: dict,
     text: str,
     shared_results: dict,
+    image_path: str | None = None,
 ) -> None:
     """Run a full session for one account inside a child process."""
     poster = FacebookPoster(account, config)
@@ -36,7 +37,7 @@ def _worker(
             shared_results[account.name] = {}
             return
 
-        results = poster.publish_to_all_groups(text)
+        results = poster.publish_to_all_groups(text, image_path=image_path)
         shared_results[account.name] = dict(results)
     except Exception:
         logger.error(
@@ -58,10 +59,12 @@ class AccountManager:
         accounts: list[AccountConfig],
         config: dict,
         text: str,
+        image_path: str | None = None,
     ) -> None:
         self.accounts = accounts
         self.config = config
         self.text = text
+        self.image_path = image_path
 
     # ------------------------------------------------------------------ #
     # Sequential execution
@@ -79,7 +82,7 @@ class AccountManager:
                     summary[account.name] = {}
                     continue
 
-                results = poster.publish_to_all_groups(self.text)
+                results = poster.publish_to_all_groups(self.text, image_path=self.image_path)
                 summary[account.name] = results
 
             except Exception:
@@ -112,7 +115,7 @@ class AccountManager:
         for account in self.accounts:
             p = multiprocessing.Process(
                 target=_worker,
-                args=(account, self.config, self.text, shared_results),
+                args=(account, self.config, self.text, shared_results, self.image_path),
                 name=f"poster-{account.name}",
             )
             processes.append(p)

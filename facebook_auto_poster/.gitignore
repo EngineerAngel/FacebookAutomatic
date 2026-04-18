@@ -1,5 +1,12 @@
 # Credentials — NEVER commit
 .env
+cookies/
+
+# Runtime artifacts
+schedules.json
+uploaded_images/
+*.tmp
+*.db
 
 # Logs
 *.log
