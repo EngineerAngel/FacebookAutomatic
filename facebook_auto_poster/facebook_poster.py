@@ -16,6 +16,7 @@ from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.webdriver import WebDriver as ChromeWebDriver
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
@@ -164,6 +165,64 @@ class FacebookPoster:
     def human_wait(self, min_s: float = 1, max_s: float = 3) -> None:
         time.sleep(random.uniform(min_s, max_s))
 
+    def _human_type(self, element, text: str) -> None:
+        """Types text character by character simulating human keystroke timing."""
+        for char in text:
+            element.send_keys(char)
+            if char == " ":
+                time.sleep(random.uniform(0.10, 0.30))
+            else:
+                time.sleep(random.uniform(0.05, 0.18))
+            if random.random() < 0.05:
+                time.sleep(random.uniform(0.30, 0.80))
+
+    def _human_click(self, element) -> None:
+        """Moves mouse to element with slight random offset before clicking."""
+        try:
+            self._scroll_into_view(element)
+            actions = ActionChains(self.driver)
+            actions.move_to_element_with_offset(
+                element,
+                random.randint(-4, 4),
+                random.randint(-4, 4),
+            )
+            actions.pause(random.uniform(0.10, 0.35))
+            actions.click()
+            actions.perform()
+        except Exception:
+            element.click()
+
+    def _scroll_into_view(self, element) -> None:
+        """Scrolls element into view smoothly before interacting."""
+        self.driver.execute_script(
+            "arguments[0].scrollIntoView({behavior:'smooth', block:'center'});",
+            element,
+        )
+        time.sleep(random.uniform(0.30, 0.70))
+
+    def _find_first(
+        self,
+        selectors: list[str],
+        timeout: float = 10.0,
+        condition=EC.element_to_be_clickable,
+    ):
+        """Tries each XPath selector in order, returns first element found.
+
+        Each selector gets an equal share of the total timeout.
+        Raises the last exception if none succeed.
+        """
+        per_timeout = max(round(timeout / len(selectors), 1), 2.0)
+        last_exc: Exception = TimeoutError("No selector matched")
+        for xpath in selectors:
+            try:
+                return WebDriverWait(self.driver, per_timeout).until(
+                    condition((By.XPATH, xpath))
+                )
+            except Exception as exc:
+                last_exc = exc
+                self.logger.debug("[Selector] no encontrado: %s", xpath[:70])
+        raise last_exc
+
     def _screenshot(self, filename: str) -> None:
         path = os.path.join(self.account.screenshots_dir, filename)
         try:
@@ -263,16 +322,23 @@ class FacebookPoster:
             return False
 
     def _is_logged_in(self) -> bool:
-        """Comprueba si la sesión está activa buscando elementos del feed."""
-        try:
-            WebDriverWait(self.driver, 8).until(
-                EC.presence_of_element_located(
-                    (By.XPATH, "//div[@role='navigation']")
-                )
-            )
-            return "/login" not in self.driver.current_url
-        except Exception:
+        """Comprueba si la sesión está activa probando múltiples selectores."""
+        if "/login" in self.driver.current_url:
             return False
+        for xpath in [
+            "//div[@role='navigation']",
+            "//div[@role='banner']",
+            "//div[@aria-label='Facebook']",
+            "//div[@data-pagelet='LeftRail']",
+        ]:
+            try:
+                WebDriverWait(self.driver, 3).until(
+                    EC.presence_of_element_located((By.XPATH, xpath))
+                )
+                return True
+            except Exception:
+                continue
+        return False
 
     def _detect_challenge(self) -> str:
         """Detecta si Facebook está mostrando un CAPTCHA o checkpoint.
@@ -368,16 +434,18 @@ class FacebookPoster:
             )
             self.logger.info("[Login] Formulario encontrado. Ingresando credenciales ...")
             self.human_wait()
+            self._human_click(email_input)
             email_input.clear()
-            email_input.send_keys(self.account.email)
+            self._human_type(email_input, self.account.email)
 
             self.human_wait(0.5, 1.5)
 
             pass_input = wait.until(
                 EC.presence_of_element_located((By.XPATH, "//input[@name='pass']"))
             )
+            self._human_click(pass_input)
             pass_input.clear()
-            pass_input.send_keys(self.account.password)
+            self._human_type(pass_input, self.account.password)
 
             self.human_wait(0.5, 1.5)
             self.logger.info("[Login] Enviando formulario ...")
@@ -456,6 +524,12 @@ class FacebookPoster:
             self.driver.get(url)
             self.human_wait(3, 6)
 
+            # Pausa de "lectura" — simula que el usuario mira la página al cargar
+            self.driver.execute_script("window.scrollBy({top: random_px, behavior:'smooth'})".replace(
+                "random_px", str(random.randint(80, 250))
+            ))
+            self.human_wait(1, 2)
+
             # Detectar CAPTCHA/checkpoint antes de verificar contenido
             challenge = self._detect_challenge()
             if challenge != "clear":
@@ -494,28 +568,28 @@ class FacebookPoster:
 
                 wait = WebDriverWait(self.driver, 15)
 
-                # --- Abrir compositor: clic en "Escribe algo..." -----------
-                composer = wait.until(
-                    EC.element_to_be_clickable(
-                        (By.XPATH,
-                         "//span[contains(text(),'Escribe algo')] "
-                         "| //span[contains(text(),'Write something')] "
-                         "| //span[contains(text(),'¿Qué estás pensando')]")
-                    )
-                )
-                composer.click()
+                # --- Abrir compositor -----------------------------------
+                composer = self._find_first([
+                    "//span[contains(text(),'Escribe algo')]",
+                    "//span[contains(text(),'Write something')]",
+                    "//span[contains(text(),'¿Qué estás pensando')]",
+                    "//span[contains(text(),'What')]",
+                    "//div[@role='button'][contains(@aria-label,'post')]",
+                    "//div[@data-pagelet='GroupInlineComposer']//div[@role='button']",
+                ], timeout=15)
+                self._human_click(composer)
                 self.human_wait(2, 4)
 
-                # --- Escribir en el editor del modal ----------------------
-                editor = wait.until(
-                    EC.presence_of_element_located(
-                        (By.XPATH,
-                         "//div[@role='dialog']//div[@contenteditable='true']")
-                    )
-                )
-                editor.click()
+                # --- Escribir en el editor del modal --------------------
+                editor = self._find_first([
+                    "//div[@role='dialog']//div[@contenteditable='true']",
+                    "//div[@contenteditable='true'][@data-lexical-editor='true']",
+                    "//div[@contenteditable='true'][contains(@class,'notranslate')]",
+                    "//div[@contenteditable='true']",
+                ], timeout=10, condition=EC.presence_of_element_located)
+                self._human_click(editor)
                 self.human_wait(0.5, 1)
-                editor.send_keys(text)
+                self._human_type(editor, text)
 
                 # --- Si el texto tiene URL, esperar y cerrar el preview ----
                 if any(s in text for s in ("http://", "https://", "www.")):
@@ -528,23 +602,16 @@ class FacebookPoster:
                     self._attach_image(image_path, wait)
 
                 # --- Click Publicar (submit) ------------------------------
-                try:
-                    pub_btn = wait.until(
-                        EC.element_to_be_clickable(
-                            (By.XPATH, "//div[@aria-label='Publicar']")
-                        )
-                    )
-                except Exception:
-                    pub_btn = wait.until(
-                        EC.element_to_be_clickable(
-                            (
-                                By.XPATH,
-                                "//button[contains(@aria-label,'Publicar')]",
-                            )
-                        )
-                    )
-
-                pub_btn.click()
+                pub_btn = self._find_first([
+                    "//div[@aria-label='Publicar']",
+                    "//div[@aria-label='Post']",
+                    "//button[@aria-label='Publicar']",
+                    "//button[@aria-label='Post']",
+                    "//div[@role='dialog']//div[@role='button'][contains(@aria-label,'ublicar')]",
+                    "//div[@role='dialog']//div[@role='button'][contains(@aria-label,'ost')]",
+                ], timeout=10)
+                self.human_wait(0.3, 0.8)
+                self._human_click(pub_btn)
 
                 # Wait for the modal to disappear as confirmation
                 WebDriverWait(self.driver, 20).until(
