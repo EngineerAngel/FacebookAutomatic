@@ -173,31 +173,57 @@ class FacebookPoster:
             self.logger.warning("Failed to save screenshot %s", path, exc_info=True)
 
     def _attach_image(self, image_path: str, wait: WebDriverWait) -> None:
-        """Adjunta una imagen al compositor abierto usando el input file oculto."""
-        # Intentar clic en botón "Foto/vídeo" para revelar el input
+        """Adjunta imagen al compositor usando el input file oculto vía JS.
+
+        Evita hacer clic en el botón 'Foto/vídeo' que puede recargar el compositor.
+        """
+        abs_path = os.path.abspath(image_path)
+
+        # Revelar el input file oculto con JS y enviar el archivo directamente
+        file_input = wait.until(
+            EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
+        )
+        self.driver.execute_script(
+            "arguments[0].style.display='block'; arguments[0].style.visibility='visible';",
+            file_input,
+        )
+        file_input.send_keys(abs_path)
+        self.logger.info("[Image] Archivo enviado al input: %s", abs_path)
+
+        # Esperar a que el thumbnail de la imagen aparezca en el compositor
         try:
-            photo_btn = wait.until(
-                EC.element_to_be_clickable(
+            wait.until(
+                EC.presence_of_element_located(
                     (By.XPATH,
-                     "//div[@role='dialog']//div[@aria-label='Foto/vídeo' "
-                     "or @aria-label='Photo/video' "
-                     "or @aria-label='Foto/video']")
+                     "//div[@role='dialog']//img[contains(@src,'blob:') "
+                     "or contains(@src,'scontent')]")
                 )
             )
-            photo_btn.click()
+            self.logger.info("[Image] Thumbnail de imagen cargado correctamente")
+        except Exception:
+            self.logger.warning("[Image] Timeout esperando thumbnail — continuando igual")
+            self.human_wait(3, 5)
+
+    def _dismiss_link_preview(self) -> None:
+        """Cierra la previsualización de link que Facebook genera automáticamente.
+
+        Cuando el texto contiene una URL, Facebook agrega un preview card al compositor.
+        Si no se elimina, puede interferir con el botón Publicar o generar errores.
+        """
+        self.human_wait(3, 5)
+        try:
+            close_btn = self.driver.find_element(
+                By.XPATH,
+                "//div[@role='dialog']"
+                "//div[@aria-label='Eliminar adjunto' "
+                "or @aria-label='Remove attachment' "
+                "or @aria-label='Quitar']",
+            )
+            close_btn.click()
+            self.logger.info("[Publish] Previsualización de link eliminada")
             self.human_wait(1, 2)
         except Exception:
-            self.logger.debug("No se encontró botón Foto/video, buscando input file directo")
-
-        # Localizar input[type=file] dentro del dialog
-        file_input = wait.until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//div[@role='dialog']//input[@type='file']")
-            )
-        )
-        file_input.send_keys(os.path.abspath(image_path))
-        self.logger.info("Imagen adjuntada: %s", image_path)
-        self.human_wait(3, 5)
+            self.logger.debug("[Publish] Sin previsualización de link — continuando")
 
     def _save_cookies(self) -> None:
         cookies = self.driver.get_cookies()
@@ -247,6 +273,57 @@ class FacebookPoster:
             return "/login" not in self.driver.current_url
         except Exception:
             return False
+
+    def _detect_challenge(self) -> str:
+        """Detecta si Facebook está mostrando un CAPTCHA o checkpoint.
+
+        Returns 'captcha', 'checkpoint', o 'clear'.
+        """
+        url = self.driver.current_url
+        if "/checkpoint/" in url or "/identity/" in url:
+            return "checkpoint"
+        try:
+            self.driver.find_element(By.XPATH, "//iframe[contains(@src,'recaptcha')]")
+            return "captcha"
+        except Exception:
+            pass
+        try:
+            self.driver.find_element(
+                By.XPATH,
+                "//*[contains(text(),'Verifica tu identidad') "
+                "or contains(text(),'Verify your identity') "
+                "or contains(text(),'security check')]",
+            )
+            return "captcha"
+        except Exception:
+            pass
+        return "clear"
+
+    def _wait_for_manual_resolution(self) -> bool:
+        """Pausa hasta que el operador resuelva el CAPTCHA/checkpoint manualmente.
+
+        Polling cada 10s, timeout 60s (6 intentos). Retorna True si se resolvió.
+        """
+        self._screenshot("captcha_detected.png")
+        print(f"\n{'='*60}")
+        print(f"  CAPTCHA/CHECKPOINT detectado — cuenta: {self.account.name}")
+        print(f"  Resuelve manualmente en el navegador Chrome.")
+        print(f"  Tiempo máximo: 60 segundos (verificando cada 10s)")
+        print(f"{'='*60}\n")
+        self.logger.warning("[CAPTCHA] Esperando resolución manual para %s", self.account.name)
+
+        for attempt in range(1, 7):  # 6 × 10s = 60s
+            time.sleep(10)
+            if self._detect_challenge() == "clear" and self._is_logged_in():
+                self.logger.info("[CAPTCHA] Resuelto manualmente en intento %d/6", attempt)
+                return True
+            self.logger.info("[CAPTCHA] Intento %d/6 — aún pendiente", attempt)
+
+        self.logger.error(
+            "[CAPTCHA] Timeout 60s — no se resolvió. Cerrando cuenta %s", self.account.name
+        )
+        print(f"\n[!] Timeout CAPTCHA — se cierra la cuenta {self.account.name}\n")
+        return False
 
     # ------------------------------------------------------------------ #
     # Login
@@ -306,21 +383,35 @@ class FacebookPoster:
             self.logger.info("[Login] Enviando formulario ...")
             pass_input.send_keys(Keys.RETURN)
 
-            # --- [3] Esperar redirección ---------------------------------
+            # --- [3] Esperar redirección (con detección de CAPTCHA) ------
             self.logger.info("[Login] Paso 4/4 — Esperando redirección fuera de /login ...")
-            try:
-                wait.until(lambda d: "/login" not in d.current_url)
-                self.logger.info("[Login] Redirección exitosa. URL actual: %s", self.driver.current_url)
-            except Exception:
-                url_actual = self.driver.current_url
+            deadline = time.monotonic() + 20
+            resolved = False
+            while time.monotonic() < deadline:
+                if "/login" not in self.driver.current_url:
+                    resolved = True
+                    break
+                challenge = self._detect_challenge()
+                if challenge != "clear":
+                    self.logger.warning("[Login] Desafío detectado: %s", challenge)
+                    if not self._wait_for_manual_resolution():
+                        job_store.record_login(self.account.name, False)
+                        return False
+                    resolved = True
+                    break
+                time.sleep(1)
+
+            if not resolved:
                 self.logger.error(
-                    "[Login] TIMEOUT esperando redirección. URL actual: %s — "
-                    "posibles causas: credenciales incorrectas, captcha o 2FA",
-                    url_actual,
+                    "[Login] TIMEOUT sin redirección. URL: %s — "
+                    "credenciales incorrectas o CAPTCHA no detectado",
+                    self.driver.current_url,
                 )
                 self._screenshot("login_blocked.png")
                 job_store.record_login(self.account.name, False)
                 return False
+
+            self.logger.info("[Login] Redirección exitosa. URL actual: %s", self.driver.current_url)
             self.human_wait(2, 4)
 
             # Cerrar diálogo "Recordar contraseña" si aparece
@@ -365,7 +456,13 @@ class FacebookPoster:
             self.driver.get(url)
             self.human_wait(3, 6)
 
-            # Verify we actually reached a group page (look for composer area)
+            # Detectar CAPTCHA/checkpoint antes de verificar contenido
+            challenge = self._detect_challenge()
+            if challenge != "clear":
+                self.logger.warning("[Nav] Desafío detectado al navegar a grupo %s: %s", group_id, challenge)
+                if not self._wait_for_manual_resolution():
+                    return False
+
             WebDriverWait(self.driver, 15).until(
                 EC.presence_of_element_located(
                     (By.XPATH, "//div[@role='main']")
@@ -419,7 +516,12 @@ class FacebookPoster:
                 editor.click()
                 self.human_wait(0.5, 1)
                 editor.send_keys(text)
-                self.human_wait(1, 2)
+
+                # --- Si el texto tiene URL, esperar y cerrar el preview ----
+                if any(s in text for s in ("http://", "https://", "www.")):
+                    self._dismiss_link_preview()
+                else:
+                    self.human_wait(1, 2)
 
                 # --- Adjuntar imagen si se proporcionó --------------------
                 if image_path:
