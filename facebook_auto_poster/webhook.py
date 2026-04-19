@@ -82,7 +82,7 @@ def _fire_with_retry(url: str, payload: dict, max_retries: int = 3) -> None:
 
 
 def fire(
-    url: str,
+    url: str | None,
     job_id: str,
     status: str,
     results: dict[str, dict[str, bool]] | None = None,

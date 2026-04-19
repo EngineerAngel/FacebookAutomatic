@@ -12,9 +12,10 @@ import random
 import time
 from pathlib import Path
 
-from selenium import webdriver
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.webdriver import WebDriver as ChromeWebDriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
@@ -22,10 +23,13 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 try:
     from webdriver_manager.chrome import ChromeDriverManager
+    _HAS_WDM = True
 except ImportError:
     ChromeDriverManager = None  # type: ignore[assignment,misc]
+    _HAS_WDM = False
 
 from config import AccountConfig
+import job_store
 
 # ---------------------------------------------------------------------------
 # Text-variation helpers
@@ -78,9 +82,9 @@ class FacebookPoster:
         )
         self.logger.addHandler(fh)
 
-        # Console handler
+        # Console handler — DEBUG para ver cada paso en la terminal
         ch = logging.StreamHandler()
-        ch.setLevel(logging.INFO)
+        ch.setLevel(logging.DEBUG)
         ch.setFormatter(
             logging.Formatter(
                 "%(asctime)s - [%(name)s] - %(levelname)s - %(message)s"
@@ -97,34 +101,9 @@ class FacebookPoster:
     # ------------------------------------------------------------------ #
     # WebDriver setup
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def _kill_chrome() -> None:
-        """Cierra todos los procesos de Chrome para liberar el perfil."""
-        import subprocess
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "chrome.exe"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            time.sleep(2)  # dar tiempo a que libere el lock del perfil
-        except Exception:
-            pass
-
-    def _build_driver(self) -> webdriver.Chrome:
+    def _build_driver(self) -> ChromeWebDriver:
+        self.logger.info("[Driver] Construyendo WebDriver para %s ...", self.account.name)
         opts = Options()
-
-        # Perfil de Chrome persistente (evita CAPTCHAs)
-        chrome_profile = os.getenv("CHROME_PROFILE_PATH", "").strip()
-        if chrome_profile:
-            # Cerrar Chrome para que libere el lock del perfil antes de abrirlo
-            self._kill_chrome()
-            opts.add_argument(f"--user-data-dir={chrome_profile}")
-            profile_name = os.getenv("CHROME_PROFILE_NAME", "Default").strip()
-            opts.add_argument(f"--profile-directory={profile_name}")
-            self.logger.info(
-                "Usando perfil de Chrome: %s (%s)", chrome_profile, profile_name
-            )
 
         # Anti-detección
         opts.add_argument(
@@ -141,6 +120,7 @@ class FacebookPoster:
 
         if self.config["browser_headless"]:
             opts.add_argument("--headless=new")
+            self.logger.info("[Driver] Modo headless activado")
 
         opts.add_argument("--disable-notifications")
         opts.add_argument("--lang=es")
@@ -148,27 +128,34 @@ class FacebookPoster:
         # Service — prefer explicit path, then webdriver-manager, then PATH
         chromedriver_path = os.getenv("CHROMEDRIVER_PATH", "").strip()
         if chromedriver_path:
+            self.logger.info("[Driver] ChromeDriver explícito: %s", chromedriver_path)
             service = Service(executable_path=chromedriver_path)
-        elif ChromeDriverManager is not None:
+        elif _HAS_WDM and ChromeDriverManager is not None:
+            self.logger.info("[Driver] Usando webdriver-manager para localizar ChromeDriver ...")
             service = Service(ChromeDriverManager().install())
         else:
-            service = Service()  # rely on PATH
+            self.logger.info("[Driver] Buscando ChromeDriver en PATH del sistema ...")
+            service = Service()
 
-        driver = webdriver.Chrome(service=service, options=opts)
+        self.logger.info("[Driver] Iniciando Chrome ...")
+        try:
+            driver = ChromeWebDriver(service=service, options=opts)
+        except WebDriverException:
+            self.logger.error("[Driver] FALLO al iniciar Chrome", exc_info=True)
+            raise
 
-        # Remove navigator.webdriver flag
-        driver.execute_cdp_cmd(
-            "Page.addScriptToEvaluateOnNewDocument",
-            {
-                "source": (
-                    "Object.defineProperty(navigator, 'webdriver', "
-                    "{get: () => undefined})"
-                )
-            },
-        )
+        self.logger.info("[Driver] Chrome abierto. URL inicial: %s", driver.current_url)
+
+        try:
+            driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
+            )
+        except Exception:
+            self.logger.warning("[Driver] No se pudo aplicar CDP anti-detección", exc_info=True)
 
         driver.implicitly_wait(self.config["implicit_wait"])
-        self.logger.info("WebDriver initialised for %s", self.account.name)
+        self.logger.info("[Driver] WebDriver listo para %s", self.account.name)
         return driver
 
     # ------------------------------------------------------------------ #
@@ -225,24 +212,42 @@ class FacebookPoster:
         self.logger.info("Cookies guardadas: %s", path)
 
     def _load_cookies(self) -> bool:
-        """Carga cookies guardadas. Devuelve True si las encontró y cargó."""
+        """Carga cookies guardadas. Devuelve True si las encontró y cargó.
+        Nunca levanta excepción — cualquier error retorna False."""
         path = self._cookie_path()
+        self.logger.info("[Cookies] Buscando cookies en: %s", path)
         if not path.exists():
+            self.logger.info("[Cookies] No hay cookies guardadas — se hará login normal")
             return False
-        # Las cookies solo se pueden inyectar estando en el dominio
-        self.driver.get("https://www.facebook.com/")
-        self.human_wait(1, 2)
-        with open(path, "r", encoding="utf-8") as f:
-            cookies = json.load(f)
-        for cookie in cookies:
-            # Selenium rechaza cookies con campos extra de algunos navegadores
-            cookie.pop("sameSite", None)
+        try:
+            self.logger.info("[Cookies] Archivo encontrado. Navegando a facebook.com para inyectar cookies ...")
+            self.driver.get("https://www.facebook.com/")
+            self.logger.info("[Cookies] URL actual tras navegar: %s", self.driver.current_url)
+            self.human_wait(1, 2)
+            with open(path, "r", encoding="utf-8") as f:
+                cookies = json.load(f)
+            self.logger.info("[Cookies] Inyectando %d cookies ...", len(cookies))
+            ok = 0
+            for cookie in cookies:
+                cookie.pop("sameSite", None)
+                try:
+                    self.driver.add_cookie(cookie)
+                    ok += 1
+                except Exception:
+                    pass
+            self.logger.info("[Cookies] %d/%d cookies inyectadas", ok, len(cookies))
+            return True
+        except Exception:
+            self.logger.warning(
+                "[Cookies] Error al cargar cookies de %s — borrando archivo y haciendo login normal",
+                path, exc_info=True,
+            )
             try:
-                self.driver.add_cookie(cookie)
+                path.unlink()
+                self.logger.info("[Cookies] Archivo de cookies corrupto eliminado")
             except Exception:
                 pass
-        self.logger.info("Cookies cargadas desde %s", path)
-        return True
+            return False
 
     def _is_logged_in(self) -> bool:
         """Comprueba si la sesión está activa buscando elementos del feed."""
@@ -261,26 +266,43 @@ class FacebookPoster:
     # ------------------------------------------------------------------ #
     def login(self) -> bool:
         """Inicia sesión en Facebook. Primero intenta con cookies guardadas."""
-        self.logger.info("Iniciando sesión como %s …", self.account.name)
+        self.logger.info("[Login] ── Iniciando sesión como %s ──", self.account.name)
         try:
-            # --- Intentar con cookies guardadas --------------------------
-            if self._load_cookies():
-                self.driver.refresh()
-                self.human_wait(2, 4)
-                if self._is_logged_in():
-                    self.logger.info(
-                        "Sesión restaurada desde cookies para %s", self.account.name
-                    )
-                    return True
-                self.logger.info("Cookies expiradas, haciendo login normal …")
+            # --- [1] Intentar con cookies guardadas ----------------------
+            self.logger.info("[Login] Paso 1/4 — Intentando restaurar sesión desde cookies")
+            try:
+                if self._load_cookies():
+                    self.logger.info("[Login] Cookies cargadas. Refrescando página ...")
+                    self.driver.refresh()
+                    self.logger.info("[Login] URL tras refresh: %s", self.driver.current_url)
+                    self.human_wait(2, 4)
+                    self.logger.info("[Login] Verificando si la sesión está activa ...")
+                    if self._is_logged_in():
+                        self.logger.info(
+                            "[Login] ✓ Sesión restaurada desde cookies para %s", self.account.name
+                        )
+                        job_store.record_login(self.account.name, True)
+                        return True
+                    self.logger.info("[Login] Cookies cargadas pero sesión inactiva (expiradas) — login normal")
+                else:
+                    self.logger.info("[Login] Sin cookies válidas — procediendo con login normal")
+            except Exception:
+                self.logger.warning(
+                    "[Login] Fallo en restauración de cookies — continuando con login normal",
+                    exc_info=True,
+                )
 
-            # --- Login normal --------------------------------------------
+            # --- [2] Login normal ----------------------------------------
+            self.logger.info("[Login] Paso 2/4 — Navegando a facebook.com/login ...")
             self.driver.get("https://www.facebook.com/login")
+            self.logger.info("[Login] URL actual: %s", self.driver.current_url)
             wait = WebDriverWait(self.driver, 20)
 
+            self.logger.info("[Login] Paso 3/4 — Esperando formulario de login ...")
             email_input = wait.until(
                 EC.presence_of_element_located((By.XPATH, "//input[@name='email']"))
             )
+            self.logger.info("[Login] Formulario encontrado. Ingresando credenciales ...")
             self.human_wait()
             email_input.clear()
             email_input.send_keys(self.account.email)
@@ -294,9 +316,24 @@ class FacebookPoster:
             pass_input.send_keys(self.account.password)
 
             self.human_wait(0.5, 1.5)
+            self.logger.info("[Login] Enviando formulario ...")
             pass_input.send_keys(Keys.RETURN)
 
-            wait.until(lambda d: "/login" not in d.current_url)
+            # --- [3] Esperar redirección ---------------------------------
+            self.logger.info("[Login] Paso 4/4 — Esperando redirección fuera de /login ...")
+            try:
+                wait.until(lambda d: "/login" not in d.current_url)
+                self.logger.info("[Login] Redirección exitosa. URL actual: %s", self.driver.current_url)
+            except Exception:
+                url_actual = self.driver.current_url
+                self.logger.error(
+                    "[Login] TIMEOUT esperando redirección. URL actual: %s — "
+                    "posibles causas: credenciales incorrectas, captcha o 2FA",
+                    url_actual,
+                )
+                self._screenshot("login_blocked.png")
+                job_store.record_login(self.account.name, False)
+                return False
             self.human_wait(2, 4)
 
             # Cerrar diálogo "Recordar contraseña" si aparece
@@ -321,11 +358,13 @@ class FacebookPoster:
             self._save_cookies()
 
             self.logger.info("Login exitoso para %s", self.account.name)
+            job_store.record_login(self.account.name, True)
             return True
 
         except Exception:
             self.logger.error("Login FAILED for %s", self.account.name, exc_info=True)
             self._screenshot("login_error.png")
+            job_store.record_login(self.account.name, False)
             return False
 
     # ------------------------------------------------------------------ #

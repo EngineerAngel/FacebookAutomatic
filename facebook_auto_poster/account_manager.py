@@ -9,6 +9,7 @@ import multiprocessing
 import random
 import time
 from datetime import datetime
+from multiprocessing.managers import DictProxy
 
 from config import AccountConfig
 from facebook_poster import FacebookPoster
@@ -109,7 +110,7 @@ class AccountManager:
     # ------------------------------------------------------------------ #
     def run_parallel(self) -> dict[str, dict[str, bool]]:
         manager = multiprocessing.Manager()
-        shared_results: dict = manager.dict()
+        shared_results: DictProxy = manager.dict()
 
         processes: list[multiprocessing.Process] = []
         for account in self.accounts:
@@ -139,14 +140,13 @@ class AccountManager:
         # Guard: check allowed posting hours
         current_hour = datetime.now().hour
         if current_hour not in self.config["post_hours_allowed"]:
-            logger.warning(
-                "Current hour (%d) is outside the allowed posting window %s. "
-                "Skipping this run.",
-                current_hour,
+            msg = (
+                f"Current hour ({current_hour}) is outside the allowed posting window "
                 f"{self.config['post_hours_allowed'].start}–"
-                f"{self.config['post_hours_allowed'].stop - 1}",
+                f"{self.config['post_hours_allowed'].stop - 1}"
             )
-            return {}
+            logger.warning(msg)
+            raise ValueError(msg)
 
         mode = self.config.get("execution_mode", "sequential")
         logger.info("Execution mode: %s", mode)
