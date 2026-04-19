@@ -81,6 +81,12 @@ def init_db() -> None:
                 error_msg    TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS account_cookies (
+                email      TEXT PRIMARY KEY,
+                cookies    TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_jobs_scheduled ON jobs(scheduled_for)
                 WHERE type = 'scheduled';
@@ -451,6 +457,38 @@ def get_recent_jobs(limit: int = 50) -> list[dict]:
         return jobs
 
 
+# ---------------------------------------------------------------------------
+# Cookies — asociadas al email, sobreviven renombres de cuenta
+# ---------------------------------------------------------------------------
+def save_cookies(email: str, cookies: list) -> None:
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO account_cookies (email, cookies, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(email) DO UPDATE SET
+                   cookies    = excluded.cookies,
+                   updated_at = excluded.updated_at""",
+            (email, json.dumps(cookies), now),
+        )
+
+
+def load_cookies(email: str) -> list | None:
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT cookies FROM account_cookies WHERE email=?", (email,)
+        ).fetchone()
+    return json.loads(row["cookies"]) if row else None
+
+
+def delete_cookies(email: str) -> None:
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM account_cookies WHERE email=?", (email,))
+
+
+# ---------------------------------------------------------------------------
+# Jobs scheduled
+# ---------------------------------------------------------------------------
 def list_pending_scheduled() -> list[dict]:
     """Lista jobs agendados aún pendientes (para GET /schedule)."""
     with _lock, _connect() as conn:

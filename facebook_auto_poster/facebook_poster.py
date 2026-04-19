@@ -199,33 +199,24 @@ class FacebookPoster:
         self.logger.info("Imagen adjuntada: %s", image_path)
         self.human_wait(3, 5)
 
-    def _cookie_path(self) -> Path:
-        cookies_dir = Path(__file__).resolve().parent / "cookies"
-        cookies_dir.mkdir(exist_ok=True)
-        return cookies_dir / f"{self.account.name}.json"
-
     def _save_cookies(self) -> None:
-        path = self._cookie_path()
         cookies = self.driver.get_cookies()
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(cookies, f)
-        self.logger.info("Cookies guardadas: %s", path)
+        job_store.save_cookies(self.account.email, cookies)
+        self.logger.info("[Cookies] Cookies guardadas en DB para %s", self.account.email)
 
     def _load_cookies(self) -> bool:
-        """Carga cookies guardadas. Devuelve True si las encontró y cargó.
+        """Carga cookies desde DB por email. Devuelve True si las encontró y cargó.
         Nunca levanta excepción — cualquier error retorna False."""
-        path = self._cookie_path()
-        self.logger.info("[Cookies] Buscando cookies en: %s", path)
-        if not path.exists():
+        self.logger.info("[Cookies] Buscando cookies en DB para %s", self.account.email)
+        cookies = job_store.load_cookies(self.account.email)
+        if cookies is None:
             self.logger.info("[Cookies] No hay cookies guardadas — se hará login normal")
             return False
         try:
-            self.logger.info("[Cookies] Archivo encontrado. Navegando a facebook.com para inyectar cookies ...")
+            self.logger.info("[Cookies] Cookies encontradas. Navegando a facebook.com para inyectar ...")
             self.driver.get("https://www.facebook.com/")
             self.logger.info("[Cookies] URL actual tras navegar: %s", self.driver.current_url)
             self.human_wait(1, 2)
-            with open(path, "r", encoding="utf-8") as f:
-                cookies = json.load(f)
             self.logger.info("[Cookies] Inyectando %d cookies ...", len(cookies))
             ok = 0
             for cookie in cookies:
@@ -239,14 +230,10 @@ class FacebookPoster:
             return True
         except Exception:
             self.logger.warning(
-                "[Cookies] Error al cargar cookies de %s — borrando archivo y haciendo login normal",
-                path, exc_info=True,
+                "[Cookies] Error al cargar cookies para %s — borrando de DB y haciendo login normal",
+                self.account.email, exc_info=True,
             )
-            try:
-                path.unlink()
-                self.logger.info("[Cookies] Archivo de cookies corrupto eliminado")
-            except Exception:
-                pass
+            job_store.delete_cookies(self.account.email)
             return False
 
     def _is_logged_in(self) -> bool:
