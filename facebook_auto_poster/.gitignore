@@ -34,3 +34,7 @@ env/
 .idea/
 *.swp
 *.swo
+
+# Cluade
+Cluade.md
+

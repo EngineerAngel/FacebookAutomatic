@@ -1,11 +1,12 @@
 """
-job_store.py — SQLite como fuente única de verdad para todos los jobs.
+job_store.py — SQLite como fuente única de verdad para todos los jobs y cuentas.
 
-Reemplaza scheduler_store.py. Maneja:
-  - Creación de jobs (inmediatos y agendados)
-  - Transiciones de estado: pending → running → done | failed | cancelled
-  - Resultados por cuenta/grupo
-  - Consulta de jobs agendados pendientes (para scheduler_runner)
+Tablas:
+  accounts     — cuentas activas (nombre, email, grupos, historial)
+  group_tags   — etiquetas amigables por grupo (default 'generico')
+  login_events — historial de intentos de login
+  jobs         — cola de trabajos (inmediatos y agendados)
+  job_results  — resultados por cuenta/grupo
 
 Base de datos: jobs.db (local, gitignored, nunca expuesto por API)
 """
@@ -24,26 +25,46 @@ _lock = threading.Lock()
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")   # lecturas concurrentes sin bloqueo
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
 # ---------------------------------------------------------------------------
-# Inicialización
+# Inicialización y migraciones
 # ---------------------------------------------------------------------------
 def init_db() -> None:
-    """Crea las tablas si no existen. Llamar una vez al arrancar."""
+    """Crea las tablas si no existen y aplica migraciones seguras."""
     with _lock, _connect() as conn:
         conn.executescript("""
+            CREATE TABLE IF NOT EXISTS accounts (
+                name              TEXT PRIMARY KEY,
+                email             TEXT NOT NULL,
+                created_at        TEXT NOT NULL,
+                last_login_at     TEXT,
+                last_published_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS group_tags (
+                group_id  TEXT PRIMARY KEY,
+                tag       TEXT NOT NULL DEFAULT 'generico'
+            );
+
+            CREATE TABLE IF NOT EXISTS login_events (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_name TEXT NOT NULL,
+                logged_in_at TEXT NOT NULL,
+                success      INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS jobs (
                 id            TEXT PRIMARY KEY,
                 text          TEXT NOT NULL,
-                accounts      TEXT,           -- JSON array or NULL (=all)
+                accounts      TEXT,
                 image_path    TEXT,
                 callback_url  TEXT,
-                type          TEXT NOT NULL,  -- 'immediate' | 'scheduled'
-                scheduled_for TEXT,           -- ISO 8601, only for scheduled
+                type          TEXT NOT NULL,
+                scheduled_for TEXT,
                 status        TEXT NOT NULL DEFAULT 'pending',
                 created_at    TEXT NOT NULL,
                 started_at    TEXT,
@@ -55,18 +76,204 @@ def init_db() -> None:
                 job_id       TEXT NOT NULL REFERENCES jobs(id),
                 account_name TEXT NOT NULL,
                 group_id     TEXT NOT NULL,
-                success      INTEGER NOT NULL,  -- 1 | 0
+                group_tag    TEXT NOT NULL DEFAULT 'generico',
+                success      INTEGER NOT NULL,
                 error_msg    TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_jobs_scheduled ON jobs(scheduled_for)
                 WHERE type = 'scheduled';
+            CREATE INDEX IF NOT EXISTS idx_login_events_account ON login_events(account_name);
         """)
+
+        # Migraciones seguras — no fallan si la columna ya existe
+        for stmt in [
+            "ALTER TABLE job_results ADD COLUMN group_tag TEXT NOT NULL DEFAULT 'generico'",
+            "ALTER TABLE accounts ADD COLUMN groups TEXT",
+            "ALTER TABLE accounts ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
+        ]:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
 
 
 # ---------------------------------------------------------------------------
-# Creación
+# Cuentas — sincronización desde .env
+# ---------------------------------------------------------------------------
+def upsert_accounts(accounts) -> int:
+    """
+    Sincroniza la lista de AccountConfig desde .env a la tabla accounts.
+    Guarda groups como JSON. Preserva last_login_at y last_published_at.
+    Retorna el número de cuentas sincronizadas.
+    """
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        for acc in accounts:
+            conn.execute(
+                """INSERT INTO accounts (name, email, groups, created_at, is_active)
+                   VALUES (?, ?, ?, ?, 1)
+                   ON CONFLICT(name) DO UPDATE SET
+                       email    = excluded.email,
+                       groups   = excluded.groups,
+                       is_active = 1""",
+                (acc.name, acc.email, json.dumps(acc.groups), now),
+            )
+    return len(accounts)
+
+
+def get_accounts_info() -> list[dict]:
+    """Retorna metadatos de cuentas activas (para GET /accounts de OpenClaw)."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """SELECT name, email, groups, last_login_at, last_published_at
+               FROM accounts WHERE is_active=1"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Cuentas — CRUD desde UI admin
+# ---------------------------------------------------------------------------
+def list_accounts_full() -> list[dict]:
+    """Lista completa de cuentas activas con todos sus campos."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """SELECT name, email, groups, created_at, last_login_at, last_published_at
+               FROM accounts WHERE is_active=1
+               ORDER BY name ASC"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def create_account(name: str, email: str, groups: list[str]) -> None:
+    """Crea una cuenta nueva o reactiva una eliminada."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO accounts (name, email, groups, created_at, is_active)
+               VALUES (?, ?, ?, ?, 1)
+               ON CONFLICT(name) DO UPDATE SET
+                   email    = excluded.email,
+                   groups   = excluded.groups,
+                   is_active = 1""",
+            (name, email, json.dumps(groups), now),
+        )
+
+
+def update_account(name: str, email: str, groups: list[str]) -> bool:
+    """Actualiza email y grupos de una cuenta. Retorna True si existía."""
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "UPDATE accounts SET email=?, groups=? WHERE name=? AND is_active=1",
+            (email, json.dumps(groups), name),
+        )
+        return cur.rowcount > 0
+
+
+def rename_account(old_name: str, new_name: str, email: str, groups: list[str]) -> bool:
+    """
+    Renombra una cuenta cambiando su PK. Copia timestamps, elimina la vieja.
+    Retorna True si old_name existía.
+    """
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT created_at, last_login_at, last_published_at FROM accounts WHERE name=? AND is_active=1",
+            (old_name,),
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            """INSERT INTO accounts (name, email, groups, created_at, last_login_at, last_published_at, is_active)
+               VALUES (?, ?, ?, ?, ?, ?, 1)
+               ON CONFLICT(name) DO UPDATE SET
+                   email=excluded.email, groups=excluded.groups, is_active=1""",
+            (new_name, email, json.dumps(groups), row["created_at"],
+             row["last_login_at"], row["last_published_at"]),
+        )
+        conn.execute("UPDATE accounts SET is_active=0 WHERE name=?", (old_name,))
+        # Actualizar historial de logins para que refleje el nuevo nombre
+        conn.execute(
+            "UPDATE login_events SET account_name=? WHERE account_name=?",
+            (new_name, old_name),
+        )
+        return True
+
+
+def delete_account(name: str) -> bool:
+    """Soft-delete: marca is_active=0. Retorna True si existía."""
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "UPDATE accounts SET is_active=0 WHERE name=? AND is_active=1",
+            (name,),
+        )
+        return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Login events
+# ---------------------------------------------------------------------------
+def record_login(account_name: str, success: bool) -> None:
+    """Registra un intento de login y actualiza last_login_at si fue exitoso."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO login_events (account_name, logged_in_at, success) VALUES (?,?,?)",
+            (account_name, now, int(success)),
+        )
+        if success:
+            conn.execute(
+                "UPDATE accounts SET last_login_at=? WHERE name=?",
+                (now, account_name),
+            )
+
+
+def get_recent_logins(limit: int = 50) -> list[dict]:
+    """Retorna los últimos N eventos de login."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """SELECT account_name, logged_in_at, success
+               FROM login_events
+               ORDER BY logged_in_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Group tags
+# ---------------------------------------------------------------------------
+def get_group_tag(group_id: str) -> str:
+    """Retorna el tag del grupo, o 'generico' si no tiene uno asignado."""
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT tag FROM group_tags WHERE group_id=?", (group_id,)
+        ).fetchone()
+        return row["tag"] if row else "generico"
+
+
+def set_group_tag(group_id: str, tag: str) -> None:
+    """Asigna o actualiza el tag de un grupo."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO group_tags (group_id, tag) VALUES (?,?) "
+            "ON CONFLICT(group_id) DO UPDATE SET tag = excluded.tag",
+            (group_id, tag),
+        )
+
+
+def list_group_tags() -> list[dict]:
+    """Lista todos los grupos con tags asignados."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT group_id, tag FROM group_tags ORDER BY tag ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Creación de jobs
 # ---------------------------------------------------------------------------
 def create_job(
     text: str,
@@ -114,38 +321,49 @@ def mark_done(job_id: str, results: dict[str, dict[str, bool]]) -> None:
     """
     Guarda resultados y marca el job como done.
     results = {account_name: {group_id: True|False}}
+    Almacena group_tag (snapshot) y actualiza last_published_at.
     """
+    now = datetime.now().isoformat()
     with _lock, _connect() as conn:
         conn.execute(
             "UPDATE jobs SET status='done', finished_at=? WHERE id=?",
-            (datetime.now().isoformat(), job_id),
+            (now, job_id),
         )
         for account_name, group_results in results.items():
             for group_id, success in group_results.items():
+                row = conn.execute(
+                    "SELECT tag FROM group_tags WHERE group_id=?", (group_id,)
+                ).fetchone()
+                tag = row["tag"] if row else "generico"
+
                 conn.execute(
                     """INSERT INTO job_results
-                       (job_id, account_name, group_id, success)
-                       VALUES (?,?,?,?)""",
-                    (job_id, account_name, group_id, int(success)),
+                       (job_id, account_name, group_id, group_tag, success)
+                       VALUES (?,?,?,?,?)""",
+                    (job_id, account_name, group_id, tag, int(success)),
+                )
+                conn.execute(
+                    "UPDATE accounts SET last_published_at=? WHERE name=?",
+                    (now, account_name),
                 )
 
 
 def mark_failed(job_id: str, error_msg: str = "") -> None:
     with _lock, _connect() as conn:
+        # No sobreescribir si ya terminó correctamente
         conn.execute(
-            "UPDATE jobs SET status='failed', finished_at=?, accounts=COALESCE(accounts, accounts) WHERE id=?",
+            "UPDATE jobs SET status='failed', finished_at=? WHERE id=? AND status NOT IN ('done','cancelled')",
             (datetime.now().isoformat(), job_id),
         )
-        # Registrar el error como resultado especial
         conn.execute(
-            """INSERT INTO job_results (job_id, account_name, group_id, success, error_msg)
-               VALUES (?, '__system__', '__error__', 0, ?)""",
+            """INSERT INTO job_results (job_id, account_name, group_id, group_tag, success, error_msg)
+               VALUES (?, '__system__', '__error__', 'generico', 0, ?)""",
             (job_id, error_msg),
         )
 
 
 def cancel_job(job_id: str) -> bool:
-    """Cancela un job en estado pending/scheduled. Retorna True si existía."""
+    """Cancela un job en estado pending. Retorna True si existía."""
     with _lock, _connect() as conn:
         cursor = conn.execute(
             "UPDATE jobs SET status='cancelled' WHERE id=? AND status='pending'",
@@ -192,6 +410,47 @@ def pop_due_scheduled(now: datetime) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Consultas para API
 # ---------------------------------------------------------------------------
+def get_recent_jobs(limit: int = 50) -> list[dict]:
+    """Retorna los N jobs mas recientes con sus resultados resumidos."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """SELECT id, type, status, accounts, scheduled_for,
+                      created_at, started_at, finished_at
+               FROM jobs
+               ORDER BY created_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+
+        jobs = []
+        for r in rows:
+            # Contar éxitos/fallos del job
+            results = conn.execute(
+                """SELECT success, error_msg, account_name, group_id
+                   FROM job_results WHERE job_id=?""",
+                (r["id"],),
+            ).fetchall()
+
+            succeeded = sum(1 for x in results if x["success"] and x["account_name"] != "__system__")
+            failed    = sum(1 for x in results if not x["success"] and x["account_name"] != "__system__")
+            errors    = [x["error_msg"] for x in results
+                         if x["account_name"] == "__system__" and x["error_msg"]]
+
+            jobs.append({
+                "id":            r["id"],
+                "type":          r["type"],
+                "status":        r["status"],
+                "accounts":      json.loads(r["accounts"]) if r["accounts"] else None,
+                "scheduled_for": r["scheduled_for"],
+                "created_at":    r["created_at"],
+                "started_at":    r["started_at"],
+                "finished_at":   r["finished_at"],
+                "groups_ok":     succeeded,
+                "groups_fail":   failed,
+                "errors":        errors,
+            })
+        return jobs
+
+
 def list_pending_scheduled() -> list[dict]:
     """Lista jobs agendados aún pendientes (para GET /schedule)."""
     with _lock, _connect() as conn:

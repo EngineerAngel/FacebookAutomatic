@@ -9,6 +9,7 @@ import os
 import sys
 from pathlib import Path
 
+import job_store
 from config import CONFIG, load_accounts
 from account_manager import AccountManager
 
@@ -23,6 +24,8 @@ logger = logging.getLogger("test_run")
 
 def main() -> None:
     logger.info("=== Iniciando prueba de publicación ===\n")
+
+    job_store.init_db()
 
     try:
         accounts = load_accounts()
@@ -69,7 +72,11 @@ def main() -> None:
     # Ejecutar para esta cuenta única
     manager = AccountManager([account], CONFIG, text)
     logger.info("\nIniciando sesión de publicación...\n")
-    results = manager.run()
+    try:
+        results = manager.run()
+    except ValueError as exc:
+        logger.error("No se pudo publicar: %s", exc)
+        sys.exit(1)
 
     logger.info("\n=== Resultados de la prueba ===\n")
     manager.print_summary(results)

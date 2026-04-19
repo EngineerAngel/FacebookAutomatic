@@ -41,8 +41,11 @@ def main() -> None:
     import job_store
     import scheduler_runner
     from api_server import app
+    from config import load_accounts
 
     job_store.init_db()
+    n = job_store.upsert_accounts(load_accounts())
+    main_logger.info("Sincronizadas %d cuentas en DB", n)
     scheduler_runner.start()
 
     port = CONFIG.get("api_port", 5000)

@@ -2,9 +2,11 @@
 config.py — Global configuration and account loading.
 
 All credentials are loaded from .env via python-dotenv.
-Never import or reference real credentials in this file.
+Accounts are read from the DB (jobs.db) first; .env is used as fallback
+on the first run before the DB is populated.
 """
 
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -70,11 +72,49 @@ class AccountConfig:
 
 
 # ---------------------------------------------------------------------------
-# load_accounts() — parse ACCOUNT_NAMES and build AccountConfig list
+# load_accounts() — DB first, .env as fallback
 # ---------------------------------------------------------------------------
 def load_accounts() -> list[AccountConfig]:
-    """Read ACCOUNT_NAMES from .env and build a validated list of AccountConfig."""
+    """
+    Carga las cuentas desde la BD si existen (gestionadas via UI admin).
+    Usa .env como fallback en el primer arranque (antes de que haya BD).
+    """
+    global_password = os.getenv("FB_PASSWORD", "").strip()
+    if not global_password:
+        raise ValueError(
+            "FB_PASSWORD is not set in .env. "
+            "Provide the shared Facebook password for all accounts."
+        )
 
+    # --- Intentar desde BD --------------------------------------------------
+    try:
+        import job_store
+        rows = job_store.list_accounts_full()
+        if rows:
+            accounts = []
+            for r in rows:
+                groups = json.loads(r["groups"]) if r.get("groups") else []
+                if not groups:
+                    continue
+                accounts.append(
+                    AccountConfig(
+                        name=r["name"],
+                        email=r["email"],
+                        password=global_password,
+                        groups=groups,
+                    )
+                )
+            if accounts:
+                return accounts
+    except Exception:
+        pass  # BD no existe aún → fallback a .env
+
+    # --- Fallback: leer desde .env ------------------------------------------
+    return _load_accounts_from_env(global_password)
+
+
+def _load_accounts_from_env(global_password: str) -> list[AccountConfig]:
+    """Lee cuentas desde variables de entorno (comportamiento original)."""
     raw_names = os.getenv("ACCOUNT_NAMES", "").strip()
     if not raw_names:
         raise ValueError(
@@ -92,14 +132,11 @@ def load_accounts() -> list[AccountConfig]:
         prefix = name.upper()
 
         email = os.getenv(f"{prefix}_EMAIL", "").strip()
-        password = os.getenv(f"{prefix}_PASSWORD", "").strip()
         groups_raw = os.getenv(f"{prefix}_GROUPS", "").strip()
 
         missing: list[str] = []
         if not email:
             missing.append(f"{prefix}_EMAIL")
-        if not password:
-            missing.append(f"{prefix}_PASSWORD")
         if not groups_raw:
             missing.append(f"{prefix}_GROUPS")
 
@@ -115,8 +152,8 @@ def load_accounts() -> list[AccountConfig]:
             AccountConfig(
                 name=name.lower(),
                 email=email,
-                password=password,
-                groups=groups,
+                password=global_password,
+                groups=groups
             )
         )
 
