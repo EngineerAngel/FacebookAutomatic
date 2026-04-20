@@ -61,7 +61,16 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("Texto de publicación:\n%s\n", text)
-    logger.info("Grupos a los que se publicará: %s\n", ", ".join(account.groups))
+
+    # Usar solo el primer grupo para testing
+    if account.groups:
+        test_group = account.groups[0]
+        logger.info("Grupos disponibles: %s", ", ".join(account.groups))
+        logger.info("Usando solo PRIMER GRUPO para testing: %s\n", test_group)
+        account.groups = [test_group]
+    else:
+        logger.error("La cuenta no tiene grupos configurados.")
+        sys.exit(1)
 
     # Confirmar antes de continuar
     confirm = input("\n¿Continuar con la publicación? (s/n): ").strip().lower()
