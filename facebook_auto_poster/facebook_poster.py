@@ -1,33 +1,38 @@
 """
-facebook_poster.py — Selenium-based Facebook group poster.
+facebook_poster.py — Patchright + Emunium based Facebook group poster.
 
 Each FacebookPoster instance is bound to a single AccountConfig and
-manages its own WebDriver, logger, and screenshots directory.
+manages its own Playwright lifecycle (Playwright → Browser → Context → Page),
+logger, and screenshots directory.
+
+Anti-detection stack:
+- Patchright: binario Chromium parcheado (oculta navigator.webdriver y otros
+  fingerprints a nivel bajo). Reemplaza los CDP tricks manuales de Selenium.
+- Emunium (standalone): movimientos de mouse y teclado a nivel OS con curvas
+  de Bézier reales. Se usa solo para clics; el tipeo va por page.keyboard
+  para no depender del foco de ventana del OS.
 """
 
-import json
 import logging
 import os
 import random
 import time
 from pathlib import Path
 
-from selenium.common.exceptions import WebDriverException
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.webdriver import WebDriver as ChromeWebDriver
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+from patchright.sync_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    TimeoutError as PatchrightTimeout,
+    sync_playwright,
+)
 
 try:
-    from webdriver_manager.chrome import ChromeDriverManager
-    _HAS_WDM = True
+    from emunium import Emunium
+    _HAS_EMUNIUM = True
 except ImportError:
-    ChromeDriverManager = None  # type: ignore[assignment,misc]
-    _HAS_WDM = False
+    Emunium = None  # type: ignore[assignment,misc]
+    _HAS_EMUNIUM = False
 
 from config import AccountConfig
 import job_store
@@ -59,10 +64,22 @@ def _vary_text(text: str, account_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Constantes de la UI de Chrome (para sincronizar coordenadas con Emunium)
+# ---------------------------------------------------------------------------
+# Offset vertical aprox desde el borde superior de la ventana al viewport en Windows
+# (title bar + tab strip + address bar). Ajustable si hace falta.
+_CHROME_UI_Y_OFFSET = 85
+
+
+# ---------------------------------------------------------------------------
 # FacebookPoster
 # ---------------------------------------------------------------------------
 class FacebookPoster:
-    """Drives a single Facebook session for one account."""
+    """Drives a single Facebook session for one account using Patchright."""
+
+    # Pool de "palabras fantasma" para simular un tipeo humano con errores.
+    _FAKE_WORDS = ("aaa", "zzz", "hmm", "err")
+    _TYPO_ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
     def __init__(self, account: AccountConfig, config: dict) -> None:
         self.account = account
@@ -72,92 +89,91 @@ class FacebookPoster:
         self.logger = logging.getLogger(f"poster.{account.name}")
         self.logger.setLevel(logging.DEBUG)
 
-        # File handler (per-account)
         os.makedirs(os.path.dirname(account.log_file), exist_ok=True)
         fh = logging.FileHandler(account.log_file, encoding="utf-8")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(
-            logging.Formatter(
-                "%(asctime)s - [%(name)s] - %(levelname)s - %(message)s"
-            )
+            logging.Formatter("%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
         )
         self.logger.addHandler(fh)
 
-        # Console handler — DEBUG para ver cada paso en la terminal
         ch = logging.StreamHandler()
         ch.setLevel(logging.DEBUG)
         ch.setFormatter(
-            logging.Formatter(
-                "%(asctime)s - [%(name)s] - %(levelname)s - %(message)s"
-            )
+            logging.Formatter("%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
         )
         self.logger.addHandler(ch)
 
         # -- screenshots dir ---------------------------------------------
         Path(account.screenshots_dir).mkdir(parents=True, exist_ok=True)
 
-        # -- WebDriver ---------------------------------------------------
-        self.driver = self._build_driver()
+        # -- Runtime flags (per-account scope) ---------------------------
+        self._banned: bool = False
+        self._publish_count: int = 0
+
+        # -- Window offsets for Emunium screen-coord translation ---------
+        pos_x, pos_y = config.get("browser_window_position", (0, 0))
+        self._window_x_offset = pos_x
+        self._window_y_offset = pos_y + _CHROME_UI_Y_OFFSET
+
+        # -- Playwright lifecycle ----------------------------------------
+        self._pw = sync_playwright().start()
+        self.browser, self.context, self.page = self._build_browser()
+
+        # -- Emunium (standalone, opera en coords OS) --------------------
+        self._em = None
+        if config.get("emunium_enabled", True) and _HAS_EMUNIUM and not config["browser_headless"]:
+            try:
+                self._em = Emunium()
+                self.logger.info("[Emunium] Activo (coords OS: offset=%d,%d)",
+                                 self._window_x_offset, self._window_y_offset)
+            except Exception:
+                self.logger.warning("[Emunium] Error inicializando — fallback a clicks Patchright", exc_info=True)
+                self._em = None
 
     # ------------------------------------------------------------------ #
-    # WebDriver setup
+    # Browser setup
     # ------------------------------------------------------------------ #
-    def _build_driver(self) -> ChromeWebDriver:
-        self.logger.info("[Driver] Construyendo WebDriver para %s ...", self.account.name)
-        opts = Options()
+    def _build_browser(self) -> tuple[Browser, BrowserContext, Page]:
+        self.logger.info("[Driver] Construyendo browser Patchright para %s ...", self.account.name)
 
-        # Anti-detección
-        opts.add_argument(
-            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        w, h = self.config["browser_window_size"]
+        pos_x, pos_y = self.config.get("browser_window_position", (0, 0))
+        headless = bool(self.config["browser_headless"])
+
+        args = [
+            f"--window-position={pos_x},{pos_y}",
+            f"--window-size={w},{h}",
+            "--disable-notifications",
+            "--lang=es",
+        ]
+
+        if headless:
+            self.logger.info("[Driver] Modo headless activado")
+
+        user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         )
-        opts.add_argument("--disable-blink-features=AutomationControlled")
-        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-        opts.add_experimental_option("useAutomationExtension", False)
 
-        w, h = self.config["browser_window_size"]
-        opts.add_argument(f"--window-size={w},{h}")
-
-        if self.config["browser_headless"]:
-            opts.add_argument("--headless=new")
-            self.logger.info("[Driver] Modo headless activado")
-
-        opts.add_argument("--disable-notifications")
-        opts.add_argument("--lang=es")
-
-        # Service — prefer explicit path, then webdriver-manager, then PATH
-        chromedriver_path = os.getenv("CHROMEDRIVER_PATH", "").strip()
-        if chromedriver_path:
-            self.logger.info("[Driver] ChromeDriver explícito: %s", chromedriver_path)
-            service = Service(executable_path=chromedriver_path)
-        elif _HAS_WDM and ChromeDriverManager is not None:
-            self.logger.info("[Driver] Usando webdriver-manager para localizar ChromeDriver ...")
-            service = Service(ChromeDriverManager().install())
-        else:
-            self.logger.info("[Driver] Buscando ChromeDriver en PATH del sistema ...")
-            service = Service()
-
-        self.logger.info("[Driver] Iniciando Chrome ...")
         try:
-            driver = ChromeWebDriver(service=service, options=opts)
-        except WebDriverException:
-            self.logger.error("[Driver] FALLO al iniciar Chrome", exc_info=True)
+            browser = self._pw.chromium.launch(headless=headless, args=args)
+        except Exception:
+            self.logger.error("[Driver] FALLO al lanzar Chromium parcheado", exc_info=True)
             raise
 
-        self.logger.info("[Driver] Chrome abierto. URL inicial: %s", driver.current_url)
+        context = browser.new_context(
+            user_agent=user_agent,
+            viewport={"width": w, "height": h},
+            locale="es-ES",
+        )
+        # Timeout por defecto (ms) para operaciones que no lo especifiquen
+        context.set_default_timeout(self.config.get("implicit_wait", 10) * 1000)
 
-        try:
-            driver.execute_cdp_cmd(
-                "Page.addScriptToEvaluateOnNewDocument",
-                {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
-            )
-        except Exception:
-            self.logger.warning("[Driver] No se pudo aplicar CDP anti-detección", exc_info=True)
-
-        driver.implicitly_wait(self.config["implicit_wait"])
-        self.logger.info("[Driver] WebDriver listo para %s", self.account.name)
-        return driver
+        page = context.new_page()
+        self.logger.info("[Driver] Patchright listo. URL inicial: %s", page.url or "(blank)")
+        return browser, context, page
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -165,59 +181,113 @@ class FacebookPoster:
     def human_wait(self, min_s: float = 1, max_s: float = 3) -> None:
         time.sleep(random.uniform(min_s, max_s))
 
-    def _human_type(self, element, text: str) -> None:
-        """Types text character by character simulating human keystroke timing."""
+    def _human_type(self, locator, text: str) -> None:
+        """Tipea con delays humanos + typos falsos + palabras fantasma.
+
+        Asume que el locator ya está enfocado (hacer _human_click antes).
+        Usa page.keyboard en vez de emunium.type_text para no depender del
+        foco de ventana del OS.
+        """
+        try:
+            locator.click(timeout=5000)
+        except Exception:
+            # Si no podemos clickear, intentamos enfocar igual
+            try:
+                locator.focus(timeout=3000)
+            except Exception:
+                pass
+
+        kb = self.page.keyboard
+        chars_since_fake_word = 0
+
         for char in text:
-            element.send_keys(char)
+            # Palabra fantasma en fronteras de espacio (cada ~10 chars)
+            if (
+                chars_since_fake_word >= 10
+                and char == " "
+                and random.random() < 0.05
+            ):
+                fake = random.choice(self._FAKE_WORDS)
+                for fc in fake:
+                    kb.type(fc)
+                    time.sleep(random.uniform(0.05, 0.15))
+                time.sleep(random.uniform(0.30, 0.60))
+                for _ in fake:
+                    kb.press("Backspace")
+                    time.sleep(random.uniform(0.04, 0.10))
+                time.sleep(random.uniform(0.10, 0.25))
+                chars_since_fake_word = 0
+
+            # Typo puntual: 5% chance de char incorrecto + corrección
+            if char != " " and random.random() < 0.05:
+                wrong = random.choice(self._TYPO_ALPHABET)
+                kb.type(wrong)
+                time.sleep(random.uniform(0.15, 0.35))
+                kb.press("Backspace")
+                time.sleep(random.uniform(0.08, 0.18))
+
+            kb.type(char)
             if char == " ":
                 time.sleep(random.uniform(0.10, 0.30))
             else:
                 time.sleep(random.uniform(0.05, 0.18))
             if random.random() < 0.05:
                 time.sleep(random.uniform(0.30, 0.80))
+            chars_since_fake_word += 1
 
-    def _human_click(self, element) -> None:
-        """Moves mouse to element with slight random offset before clicking."""
+    def _human_click(self, locator) -> None:
+        """Mueve el mouse a un locator con curva Bézier vía Emunium y clickea.
+
+        Si Emunium no está activo (headless o falló init), usa el click nativo
+        de Patchright que ya hace auto-wait de actionability.
+        """
         try:
-            self._scroll_into_view(element)
-            actions = ActionChains(self.driver)
-            actions.move_to_element_with_offset(
-                element,
-                random.randint(-4, 4),
-                random.randint(-4, 4),
-            )
-            actions.pause(random.uniform(0.10, 0.35))
-            actions.click()
-            actions.perform()
+            locator.scroll_into_view_if_needed(timeout=5000)
         except Exception:
-            element.click()
-
-    def _scroll_into_view(self, element) -> None:
-        """Scrolls element into view smoothly before interacting."""
-        self.driver.execute_script(
-            "arguments[0].scrollIntoView({behavior:'smooth', block:'center'});",
-            element,
-        )
+            pass
         time.sleep(random.uniform(0.30, 0.70))
 
-    def _find_first(
-        self,
-        selectors: list[str],
-        timeout: float = 10.0,
-        condition=EC.element_to_be_clickable,
-    ):
-        """Tries each XPath selector in order, returns first element found.
+        if self._em is not None:
+            try:
+                box = locator.bounding_box(timeout=5000)
+                if box:
+                    center = {
+                        "x": int(box["x"] + box["width"] / 2) + self._window_x_offset,
+                        "y": int(box["y"] + box["height"] / 2) + self._window_y_offset,
+                    }
+                    self._em.move_to(center)
+                    time.sleep(random.uniform(0.10, 0.35))
+                    self._em.click_at(center)
+                    return
+            except Exception:
+                self.logger.debug("[Emunium] click falló, fallback a Patchright click", exc_info=True)
 
-        Each selector gets an equal share of the total timeout.
-        Raises the last exception if none succeed.
+        # Fallback: Patchright click (auto-wait actionability + pequeño offset)
+        try:
+            locator.click(
+                timeout=10000,
+                position={
+                    "x": random.randint(5, 20),
+                    "y": random.randint(5, 20),
+                },
+            )
+        except Exception:
+            locator.click(timeout=10000, force=True)
+
+    def _find_first(self, selectors: list[str], timeout: float = 10.0, visible: bool = True):
+        """Intenta cada XPath selector en orden, devuelve el primer locator listo.
+
+        Comparte el timeout total entre los selectores como en la versión
+        Selenium. Retorna el locator ya esperado (listo para click/type).
         """
         per_timeout = max(round(timeout / len(selectors), 1), 2.0)
         last_exc: Exception = TimeoutError("No selector matched")
+        state = "visible" if visible else "attached"
         for xpath in selectors:
             try:
-                return WebDriverWait(self.driver, per_timeout).until(
-                    condition((By.XPATH, xpath))
-                )
+                loc = self.page.locator(xpath).first
+                loc.wait_for(state=state, timeout=int(per_timeout * 1000))
+                return loc
             except Exception as exc:
                 last_exc = exc
                 self.logger.debug("[Selector] no encontrado: %s", xpath[:70])
@@ -226,72 +296,90 @@ class FacebookPoster:
     def _screenshot(self, filename: str) -> None:
         path = os.path.join(self.account.screenshots_dir, filename)
         try:
-            self.driver.save_screenshot(path)
+            self.page.screenshot(path=path)
             self.logger.info("Screenshot saved: %s", path)
         except Exception:
             self.logger.warning("Failed to save screenshot %s", path, exc_info=True)
 
-    def _attach_image(self, image_path: str, wait: WebDriverWait) -> None:
-        """Adjunta imagen al compositor usando el input file oculto vía JS.
+    def _attach_image(self, image_path: str) -> None:
+        """Adjunta imagen al compositor usando el input file oculto.
 
-        Evita hacer clic en el botón 'Foto/vídeo' que puede recargar el compositor.
+        Patchright maneja inputs ocultos nativamente — no hace falta el
+        display:block via JS como en Selenium.
         """
         abs_path = os.path.abspath(image_path)
 
-        # Revelar el input file oculto con JS y enviar el archivo directamente
-        file_input = wait.until(
-            EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
-        )
-        self.driver.execute_script(
-            "arguments[0].style.display='block'; arguments[0].style.visibility='visible';",
-            file_input,
-        )
-        file_input.send_keys(abs_path)
+        self.page.set_input_files("//input[@type='file']", abs_path, timeout=15000)
         self.logger.info("[Image] Archivo enviado al input: %s", abs_path)
 
-        # Esperar a que el thumbnail de la imagen aparezca en el compositor
+        # Esperar thumbnail
         try:
-            wait.until(
-                EC.presence_of_element_located(
-                    (By.XPATH,
-                     "//div[@role='dialog']//img[contains(@src,'blob:') "
-                     "or contains(@src,'scontent')]")
-                )
-            )
+            self.page.locator(
+                "//div[@role='dialog']//img[contains(@src,'blob:') "
+                "or contains(@src,'scontent')]"
+            ).first.wait_for(state="visible", timeout=15000)
             self.logger.info("[Image] Thumbnail de imagen cargado correctamente")
         except Exception:
             self.logger.warning("[Image] Timeout esperando thumbnail — continuando igual")
             self.human_wait(3, 5)
 
     def _dismiss_link_preview(self) -> None:
-        """Cierra la previsualización de link que Facebook genera automáticamente.
-
-        Cuando el texto contiene una URL, Facebook agrega un preview card al compositor.
-        Si no se elimina, puede interferir con el botón Publicar o generar errores.
-        """
+        """Cierra la previsualización de link que Facebook genera automáticamente."""
         self.human_wait(3, 5)
         try:
-            close_btn = self.driver.find_element(
-                By.XPATH,
+            close_btn = self.page.locator(
                 "//div[@role='dialog']"
                 "//div[@aria-label='Eliminar adjunto' "
                 "or @aria-label='Remove attachment' "
-                "or @aria-label='Quitar']",
-            )
-            close_btn.click()
+                "or @aria-label='Quitar']"
+            ).first
+            close_btn.click(timeout=3000)
             self.logger.info("[Publish] Previsualización de link eliminada")
             self.human_wait(1, 2)
         except Exception:
             self.logger.debug("[Publish] Sin previsualización de link — continuando")
 
     def _save_cookies(self) -> None:
-        cookies = self.driver.get_cookies()
+        cookies = self.context.cookies()
         job_store.save_cookies(self.account.email, cookies)
-        self.logger.info("[Cookies] Cookies guardadas en DB para %s", self.account.email)
+        self.logger.info("[Cookies] Cookies guardadas en DB para %s (%d cookies)",
+                         self.account.email, len(cookies))
+
+    def _normalize_cookies(self, cookies: list[dict]) -> list[dict]:
+        """Normaliza cookies guardadas (ya sea formato Selenium o Playwright)
+        al formato esperado por context.add_cookies()."""
+        out = []
+        for raw in cookies:
+            c = dict(raw)
+            # Selenium usaba 'expiry', Playwright usa 'expires'
+            if "expiry" in c and "expires" not in c:
+                c["expires"] = c.pop("expiry")
+            if "expires" in c:
+                try:
+                    c["expires"] = float(c["expires"])
+                except (TypeError, ValueError):
+                    c.pop("expires", None)
+            # sameSite 'None' solo es válido con secure=True
+            ss = c.get("sameSite")
+            if isinstance(ss, str):
+                ss_norm = ss.capitalize() if ss.lower() in ("lax", "strict", "none") else None
+                if ss_norm is None:
+                    c.pop("sameSite", None)
+                elif ss_norm == "None" and not c.get("secure"):
+                    c.pop("sameSite", None)
+                else:
+                    c["sameSite"] = ss_norm
+            # Requeridos: name + value
+            if not c.get("name") or "value" not in c:
+                continue
+            # Requerido: domain o url
+            if not c.get("domain") and not c.get("url"):
+                c["url"] = "https://www.facebook.com/"
+            out.append(c)
+        return out
 
     def _load_cookies(self) -> bool:
-        """Carga cookies desde DB por email. Devuelve True si las encontró y cargó.
-        Nunca levanta excepción — cualquier error retorna False."""
+        """Carga cookies desde DB por email. Devuelve True si las encontró y cargó."""
         self.logger.info("[Cookies] Buscando cookies en DB para %s", self.account.email)
         cookies = job_store.load_cookies(self.account.email)
         if cookies is None:
@@ -299,19 +387,13 @@ class FacebookPoster:
             return False
         try:
             self.logger.info("[Cookies] Cookies encontradas. Navegando a facebook.com para inyectar ...")
-            self.driver.get("https://www.facebook.com/")
-            self.logger.info("[Cookies] URL actual tras navegar: %s", self.driver.current_url)
+            self.page.goto("https://www.facebook.com/", timeout=30000)
+            self.logger.info("[Cookies] URL actual tras navegar: %s", self.page.url)
             self.human_wait(1, 2)
-            self.logger.info("[Cookies] Inyectando %d cookies ...", len(cookies))
-            ok = 0
-            for cookie in cookies:
-                cookie.pop("sameSite", None)
-                try:
-                    self.driver.add_cookie(cookie)
-                    ok += 1
-                except Exception:
-                    pass
-            self.logger.info("[Cookies] %d/%d cookies inyectadas", ok, len(cookies))
+            normalized = self._normalize_cookies(cookies)
+            self.logger.info("[Cookies] Inyectando %d cookies ...", len(normalized))
+            self.context.add_cookies(normalized)
+            self.logger.info("[Cookies] %d/%d cookies inyectadas", len(normalized), len(cookies))
             return True
         except Exception:
             self.logger.warning(
@@ -323,7 +405,7 @@ class FacebookPoster:
 
     def _is_logged_in(self) -> bool:
         """Comprueba si la sesión está activa probando múltiples selectores."""
-        if "/login" in self.driver.current_url:
+        if "/login" in self.page.url:
             return False
         for xpath in [
             "//div[@role='navigation']",
@@ -332,38 +414,85 @@ class FacebookPoster:
             "//div[@data-pagelet='LeftRail']",
         ]:
             try:
-                WebDriverWait(self.driver, 3).until(
-                    EC.presence_of_element_located((By.XPATH, xpath))
-                )
+                self.page.locator(xpath).first.wait_for(state="attached", timeout=3000)
                 return True
             except Exception:
                 continue
         return False
 
     def _detect_challenge(self) -> str:
-        """Detecta si Facebook está mostrando un CAPTCHA o checkpoint.
+        """Detecta si Facebook está mostrando CAPTCHA, checkpoint o soft-ban.
 
-        Returns 'captcha', 'checkpoint', o 'clear'.
+        Returns 'captcha', 'checkpoint', 'banned', o 'clear'.
         """
-        url = self.driver.current_url
+        url = self.page.url
         if "/checkpoint/" in url or "/identity/" in url:
             return "checkpoint"
         try:
-            self.driver.find_element(By.XPATH, "//iframe[contains(@src,'recaptcha')]")
-            return "captcha"
+            if self.page.locator("//iframe[contains(@src,'recaptcha')]").count() > 0:
+                return "captcha"
         except Exception:
             pass
         try:
-            self.driver.find_element(
-                By.XPATH,
+            if self.page.locator(
                 "//*[contains(text(),'Verifica tu identidad') "
                 "or contains(text(),'Verify your identity') "
-                "or contains(text(),'security check')]",
+                "or contains(text(),'security check')]"
+            ).count() > 0:
+                return "captcha"
+        except Exception:
+            pass
+        # Soft-ban: Facebook bloqueó temporalmente la acción o la cuenta.
+        try:
+            ban_xpath = (
+                "//*[contains(translate(text(),"
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚÑ',"
+                "'abcdefghijklmnopqrstuvwxyzáéíóúñ'),"
+                "'temporarily blocked') "
+                "or contains(translate(text(),"
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚÑ',"
+                "'abcdefghijklmnopqrstuvwxyzáéíóúñ'),"
+                "'temporalmente bloqueado') "
+                "or contains(translate(text(),"
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚÑ',"
+                "'abcdefghijklmnopqrstuvwxyzáéíóúñ'),"
+                "'action blocked') "
+                "or contains(translate(text(),"
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚÑ',"
+                "'abcdefghijklmnopqrstuvwxyzáéíóúñ'),"
+                "'acción bloqueada') "
+                "or contains(translate(text(),"
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚÑ',"
+                "'abcdefghijklmnopqrstuvwxyzáéíóúñ'),"
+                "'we suspended your account') "
+                "or contains(translate(text(),"
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚÑ',"
+                "'abcdefghijklmnopqrstuvwxyzáéíóúñ'),"
+                "'suspendimos tu cuenta') "
+                "or contains(translate(text(),"
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚÑ',"
+                "'abcdefghijklmnopqrstuvwxyzáéíóúñ'),"
+                "\"you can't use this feature\") "
+                "or contains(translate(text(),"
+                "'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÉÍÓÚÑ',"
+                "'abcdefghijklmnopqrstuvwxyzáéíóúñ'),"
+                "'no puedes usar esta función')]"
             )
-            return "captcha"
+            if self.page.locator(ban_xpath).count() > 0:
+                return "banned"
         except Exception:
             pass
         return "clear"
+
+    def _handle_banned(self, context: str) -> None:
+        """Registra y toma screenshot cuando se detecta un soft-ban."""
+        self.logger.critical(
+            "[BANNED] Soft-ban detectado en %s para cuenta %s — URL: %s",
+            context, self.account.name, self.page.url,
+        )
+        print(f"\n[!] SOFT-BAN detectado en cuenta {self.account.name} "
+              f"({context}) — abortando retries.\n")
+        self._screenshot(f"banned_{self.account.name}.png")
 
     def _wait_for_manual_resolution(self) -> bool:
         """Pausa hasta que el operador resuelva el CAPTCHA/checkpoint manualmente.
@@ -391,6 +520,29 @@ class FacebookPoster:
         print(f"\n[!] Timeout CAPTCHA — se cierra la cuenta {self.account.name}\n")
         return False
 
+    def _maybe_refresh_session(self) -> None:
+        """Cada N publicaciones exitosas, navega al home y hace pausa larga."""
+        n = self.config.get("refresh_every_n_posts", 0)
+        if n <= 0 or self._publish_count == 0 or self._publish_count % n != 0:
+            return
+        pause = random.uniform(
+            self.config["refresh_pause_min"],
+            self.config["refresh_pause_max"],
+        )
+        self.logger.info(
+            "[Refresh] %d publicaciones alcanzadas — refrescando sesión y pausando %.0f s",
+            self._publish_count, pause,
+        )
+        try:
+            self.page.goto("https://www.facebook.com/", timeout=30000)
+            self.human_wait(2, 4)
+            self.page.evaluate(
+                f"window.scrollBy({{top: {random.randint(150, 500)}, behavior:'smooth'}})"
+            )
+        except Exception:
+            self.logger.warning("[Refresh] Error navegando al home — continuando con pausa", exc_info=True)
+        time.sleep(pause)
+
     # ------------------------------------------------------------------ #
     # Login
     # ------------------------------------------------------------------ #
@@ -403,8 +555,8 @@ class FacebookPoster:
             try:
                 if self._load_cookies():
                     self.logger.info("[Login] Cookies cargadas. Refrescando página ...")
-                    self.driver.refresh()
-                    self.logger.info("[Login] URL tras refresh: %s", self.driver.current_url)
+                    self.page.reload(timeout=30000)
+                    self.logger.info("[Login] URL tras refresh: %s", self.page.url)
                     self.human_wait(2, 4)
                     self.logger.info("[Login] Verificando si la sesión está activa ...")
                     if self._is_logged_in():
@@ -424,42 +576,44 @@ class FacebookPoster:
 
             # --- [2] Login normal ----------------------------------------
             self.logger.info("[Login] Paso 2/4 — Navegando a facebook.com/login ...")
-            self.driver.get("https://www.facebook.com/login")
-            self.logger.info("[Login] URL actual: %s", self.driver.current_url)
-            wait = WebDriverWait(self.driver, 20)
+            self.page.goto("https://www.facebook.com/login", timeout=30000)
+            self.logger.info("[Login] URL actual: %s", self.page.url)
 
             self.logger.info("[Login] Paso 3/4 — Esperando formulario de login ...")
-            email_input = wait.until(
-                EC.presence_of_element_located((By.XPATH, "//input[@name='email']"))
-            )
+            email_input = self.page.locator("//input[@name='email']").first
+            email_input.wait_for(state="visible", timeout=20000)
             self.logger.info("[Login] Formulario encontrado. Ingresando credenciales ...")
             self.human_wait()
             self._human_click(email_input)
-            email_input.clear()
+            email_input.fill("")
             self._human_type(email_input, self.account.email)
 
             self.human_wait(0.5, 1.5)
 
-            pass_input = wait.until(
-                EC.presence_of_element_located((By.XPATH, "//input[@name='pass']"))
-            )
+            pass_input = self.page.locator("//input[@name='pass']").first
+            pass_input.wait_for(state="visible", timeout=20000)
             self._human_click(pass_input)
-            pass_input.clear()
+            pass_input.fill("")
             self._human_type(pass_input, self.account.password)
 
             self.human_wait(0.5, 1.5)
             self.logger.info("[Login] Enviando formulario ...")
-            pass_input.send_keys(Keys.RETURN)
+            pass_input.press("Enter")
 
-            # --- [3] Esperar redirección (con detección de CAPTCHA) ------
+            # --- [3] Esperar redirección (con detección de CAPTCHA/ban) --
             self.logger.info("[Login] Paso 4/4 — Esperando redirección fuera de /login ...")
             deadline = time.monotonic() + 20
             resolved = False
             while time.monotonic() < deadline:
-                if "/login" not in self.driver.current_url:
+                if "/login" not in self.page.url:
                     resolved = True
                     break
                 challenge = self._detect_challenge()
+                if challenge == "banned":
+                    self._banned = True
+                    self._handle_banned("login")
+                    job_store.record_login(self.account.name, False)
+                    return False
                 if challenge != "clear":
                     self.logger.warning("[Login] Desafío detectado: %s", challenge)
                     if not self._wait_for_manual_resolution():
@@ -473,13 +627,13 @@ class FacebookPoster:
                 self.logger.error(
                     "[Login] TIMEOUT sin redirección. URL: %s — "
                     "credenciales incorrectas o CAPTCHA no detectado",
-                    self.driver.current_url,
+                    self.page.url,
                 )
                 self._screenshot("login_blocked.png")
                 job_store.record_login(self.account.name, False)
                 return False
 
-            self.logger.info("[Login] Redirección exitosa. URL actual: %s", self.driver.current_url)
+            self.logger.info("[Login] Redirección exitosa. URL actual: %s", self.page.url)
             self.human_wait(2, 4)
 
             # Cerrar diálogo "Recordar contraseña" si aparece
@@ -490,7 +644,7 @@ class FacebookPoster:
                 "//a[contains(text(),'Ahora no')]",
             ]:
                 try:
-                    self.driver.find_element(By.XPATH, xpath).click()
+                    self.page.locator(xpath).first.click(timeout=2000)
                     break
                 except Exception:
                     pass
@@ -500,7 +654,6 @@ class FacebookPoster:
                 self.config["wait_after_login_max"],
             )
 
-            # Guardar cookies para la próxima ejecución
             self._save_cookies()
 
             self.logger.info("Login exitoso para %s", self.account.name)
@@ -514,6 +667,68 @@ class FacebookPoster:
             return False
 
     # ------------------------------------------------------------------ #
+    # Setup interactivo (para setup_accounts.py)
+    # ------------------------------------------------------------------ #
+    def setup_interactive(self) -> bool:
+        """Flujo interactivo: intenta restaurar cookies, si no hace login manual.
+
+        El usuario resuelve CAPTCHA si aparece y presiona ENTER. Al final
+        guarda las cookies en DB.
+        """
+        self.logger.info("=" * 50)
+        self.logger.info("Configurando cuenta: %s", self.account.name)
+        self.logger.info("=" * 50)
+
+        try:
+            self.page.goto("https://www.facebook.com/login", timeout=30000)
+            self.human_wait(2, 3)
+
+            if self._load_cookies():
+                self.page.reload(timeout=30000)
+                self.human_wait(3, 5)
+                if self._is_logged_in():
+                    self.logger.info(">>> %s ya tiene sesión activa (cookies válidas)", self.account.name)
+                    return True
+
+            self.page.goto("https://www.facebook.com/login", timeout=30000)
+
+            email_input = self.page.locator("//input[@name='email']").first
+            email_input.wait_for(state="visible", timeout=20000)
+            email_input.fill("")
+            email_input.fill(self.account.email)
+            self.human_wait(0.5, 1)
+
+            pass_input = self.page.locator("//input[@name='pass']").first
+            pass_input.wait_for(state="visible", timeout=20000)
+            pass_input.fill("")
+            pass_input.fill(self.account.password)
+            self.human_wait(0.5, 1)
+            pass_input.press("Enter")
+
+            print(f"\n{'='*50}")
+            print(f"  CUENTA: {self.account.name}")
+            print(f"{'='*50}")
+            print(f"  Si aparece un CAPTCHA, resuélvelo manualmente.")
+            print(f"  Cuando veas el feed de Facebook (página de inicio),")
+            print(f"  presiona ENTER aquí para guardar las cookies.")
+            print(f"{'='*50}\n")
+
+            input("  >>> Presiona ENTER cuando estés en el feed de inicio: ")
+
+            if self._is_logged_in():
+                self._save_cookies()
+                self.logger.info(">>> Cookies guardadas para %s", self.account.name)
+                return True
+
+            self.logger.error(">>> No se detectó sesión activa para %s", self.account.name)
+            self._screenshot("setup_error.png")
+            return False
+
+        except Exception:
+            self.logger.error("Error configurando %s", self.account.name, exc_info=True)
+            return False
+
+    # ------------------------------------------------------------------ #
     # Navigation
     # ------------------------------------------------------------------ #
     def navigate_to_group(self, group_id: str) -> bool:
@@ -521,27 +736,27 @@ class FacebookPoster:
         url = f"https://www.facebook.com/groups/{group_id}"
         self.logger.info("Navigating to group %s", group_id)
         try:
-            self.driver.get(url)
+            self.page.goto(url, timeout=30000)
             self.human_wait(3, 6)
 
             # Pausa de "lectura" — simula que el usuario mira la página al cargar
-            self.driver.execute_script("window.scrollBy({top: random_px, behavior:'smooth'})".replace(
-                "random_px", str(random.randint(80, 250))
-            ))
+            self.page.evaluate(
+                f"window.scrollBy({{top: {random.randint(80, 250)}, behavior:'smooth'}})"
+            )
             self.human_wait(1, 2)
 
-            # Detectar CAPTCHA/checkpoint antes de verificar contenido
+            # Detectar CAPTCHA/checkpoint/ban antes de verificar contenido
             challenge = self._detect_challenge()
+            if challenge == "banned":
+                self._banned = True
+                self._handle_banned(f"navigate_to_group({group_id})")
+                return False
             if challenge != "clear":
                 self.logger.warning("[Nav] Desafío detectado al navegar a grupo %s: %s", group_id, challenge)
                 if not self._wait_for_manual_resolution():
                     return False
 
-            WebDriverWait(self.driver, 15).until(
-                EC.presence_of_element_located(
-                    (By.XPATH, "//div[@role='main']")
-                )
-            )
+            self.page.locator("//div[@role='main']").first.wait_for(state="attached", timeout=15000)
             self.logger.info("Group %s loaded", group_id)
             return True
         except Exception:
@@ -556,6 +771,13 @@ class FacebookPoster:
         """Post *text* (y opcionalmente imagen) to a single group. Returns True on success."""
 
         for attempt in range(1, self.config["max_retries"] + 1):
+            if self._banned:
+                self.logger.warning(
+                    "[BANNED] Cuenta %s marcada como baneada — "
+                    "abortando publish() en grupo %s (intento %d)",
+                    self.account.name, group_id, attempt,
+                )
+                return False
             self.logger.info(
                 "Publish attempt %d/%d for group %s",
                 attempt,
@@ -564,9 +786,9 @@ class FacebookPoster:
             )
             try:
                 if not self.navigate_to_group(group_id):
+                    if self._banned:
+                        return False
                     continue
-
-                wait = WebDriverWait(self.driver, 15)
 
                 # --- Abrir compositor -----------------------------------
                 composer = self._find_first([
@@ -586,7 +808,7 @@ class FacebookPoster:
                     "//div[@contenteditable='true'][@data-lexical-editor='true']",
                     "//div[@contenteditable='true'][contains(@class,'notranslate')]",
                     "//div[@contenteditable='true']",
-                ], timeout=10, condition=EC.presence_of_element_located)
+                ], timeout=10, visible=False)
                 self._human_click(editor)
                 self.human_wait(0.5, 1)
                 self._human_type(editor, text)
@@ -599,7 +821,7 @@ class FacebookPoster:
 
                 # --- Adjuntar imagen si se proporcionó --------------------
                 if image_path:
-                    self._attach_image(image_path, wait)
+                    self._attach_image(image_path)
 
                 # --- Click Publicar (submit) ------------------------------
                 pub_btn = self._find_first([
@@ -614,14 +836,16 @@ class FacebookPoster:
                 self._human_click(pub_btn)
 
                 # Wait for the modal to disappear as confirmation
-                WebDriverWait(self.driver, 20).until(
-                    EC.invisibility_of_element_located(
-                        (By.XPATH, "//div[@role='dialog']")
-                    )
+                self.page.wait_for_selector(
+                    "//div[@role='dialog']",
+                    state="detached",
+                    timeout=20000,
                 )
                 self.logger.info(
                     "Published to group %s successfully", group_id
                 )
+                self._publish_count += 1
+                self._maybe_refresh_session()
                 return True
 
             except Exception:
@@ -650,7 +874,6 @@ class FacebookPoster:
         """
         results: dict[str, bool] = {}
 
-        # Apply per-account text variation if enabled
         if self.config.get("text_variation_mode", False):
             text = _vary_text(text, self.account.name)
             self.logger.debug("Text variation applied for %s", self.account.name)
@@ -658,6 +881,25 @@ class FacebookPoster:
         groups = self.account.groups[: self.config["max_groups_per_session"]]
 
         for idx, group_id in enumerate(groups):
+            # Idle aleatorio antes de cada grupo — simula distracción humana
+            if random.random() < self.config.get("idle_probability", 0.0):
+                idle = random.uniform(
+                    self.config["idle_min_seconds"],
+                    self.config["idle_max_seconds"],
+                )
+                self.logger.info("[Idle] Pausa aleatoria de %.1f s antes de grupo %s", idle, group_id)
+                time.sleep(idle)
+
+            if self._banned:
+                self.logger.warning(
+                    "[BANNED] Cuenta %s baneada — se saltan grupos restantes (%d pendientes)",
+                    self.account.name, len(groups) - idx,
+                )
+                results[group_id] = False
+                for remaining in groups[idx + 1:]:
+                    results[remaining] = False
+                break
+
             success = self.publish(group_id, text, image_path=image_path)
             results[group_id] = success
 
@@ -679,9 +921,17 @@ class FacebookPoster:
     # ------------------------------------------------------------------ #
     def close(self) -> None:
         try:
-            self.driver.quit()
+            self.context.close()
+        except Exception:
+            self.logger.debug("Error cerrando context", exc_info=True)
+        try:
+            self.browser.close()
+        except Exception:
+            self.logger.debug("Error cerrando browser", exc_info=True)
+        try:
+            self._pw.stop()
             self.logger.info("Browser closed for %s", self.account.name)
         except Exception:
             self.logger.warning(
-                "Error closing browser for %s", self.account.name, exc_info=True
+                "Error closing Playwright for %s", self.account.name, exc_info=True
             )

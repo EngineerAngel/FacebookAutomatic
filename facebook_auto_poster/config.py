@@ -42,12 +42,22 @@ CONFIG: dict = {
     "wait_between_accounts_max": 120,
     "browser_headless": False,
     "browser_window_size": (1280, 720),
+    "browser_window_position": (0, 0),  # Para sincronizar Emunium con la ventana real
+    "emunium_enabled": True,              # False = solo Patchright (sin mouse/keyboard OS-level)
     "implicit_wait": 10,
     "max_retries": 3,
     "text_variation_mode": True,
-    "post_hours_allowed": range(6, 23),
+    "post_hours_allowed": range(0, 24),  # TODO: revert to range(6, 23) after testing
     "execution_mode": os.getenv("EXECUTION_MODE", "sequential").strip().lower(),
     "api_port": int(os.getenv("API_PORT", "5000")),
+    # Idle aleatorio entre publicaciones (simula distracción humana)
+    "idle_probability": 0.20,
+    "idle_min_seconds": 5,
+    "idle_max_seconds": 10,
+    # Refresco periódico de la sesión cada N publicaciones exitosas
+    "refresh_every_n_posts": 10,
+    "refresh_pause_min": 60,
+    "refresh_pause_max": 120,
 }
 
 
