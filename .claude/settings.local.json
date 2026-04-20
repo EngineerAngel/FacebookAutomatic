@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(../.venv/Scripts/python.exe -c \"from setup_accounts import setup_account, main; print\\('setup_accounts import OK'\\)\")"
+      "Bash(../.venv/Scripts/python.exe -c \"from setup_accounts import setup_account, main; print\\('setup_accounts import OK'\\)\")",
+      "Bash(git add *)",
+      "Bash(git commit -m 'chore: cleanup obsolete Selenium artifacts *)"
     ]
   }
 }
