@@ -5,16 +5,8 @@ Levanta el servidor API Flask en 0.0.0.0:{API_PORT} (default 5000).
 OpenClaw u otro orquestador externo envía las órdenes vía POST /post.
 """
 
-import asyncio
 import logging
-import sys
 from pathlib import Path
-
-# Playwright/Patchright sync usa un event loop interno. En Windows + Python 3.10+
-# el ProactorEventLoop default rompe el transport subprocess — hay que forzar el
-# SelectorEventLoop ANTES de que se cree cualquier loop.
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from config import CONFIG
 
