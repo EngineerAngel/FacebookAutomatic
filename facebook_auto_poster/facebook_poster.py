@@ -36,6 +36,8 @@ except ImportError:
 
 from config import AccountConfig
 import job_store
+from gemini_commenter import GeminiCommenter
+from human_browsing import HumanBrowsing
 
 # ---------------------------------------------------------------------------
 # Text-variation helpers
@@ -130,6 +132,29 @@ class FacebookPoster:
             except Exception:
                 self.logger.warning("[Emunium] Error inicializando — fallback a clicks Patchright", exc_info=True)
                 self._em = None
+
+        # -- Gemini commenter (opcional) ---------------------------------
+        self._gemini: GeminiCommenter | None = None
+        if config.get("gemini_comment_enabled", False):
+            api_keys = config.get("gemini_api_keys", [])
+            if isinstance(api_keys, str):
+                api_keys = [api_keys]
+            self._gemini = GeminiCommenter(
+                api_keys=api_keys,
+                model=config.get("gemini_model", "gemini-2.5-flash"),
+                timeout=config.get("gemini_timeout", 15),
+                lang=config.get("gemini_comment_lang", "es-MX"),
+                logger=self.logger,
+            )
+
+        # -- Human browsing (warmup antes de publicar) -------------------
+        self._browsing: HumanBrowsing | None = None
+        if config.get("human_browsing_enabled", False):
+            self._browsing = HumanBrowsing(
+                poster=self,
+                config=config,
+                gemini=self._gemini,
+            )
 
     # ------------------------------------------------------------------ #
     # Browser setup
@@ -880,6 +905,30 @@ class FacebookPoster:
                 if not self.navigate_to_group(group_id):
                     if self._banned:
                         return False
+                    continue
+
+                # --- Calentamiento humano (scroll, hover, comentar ajeno) ---
+                # Solo en el primer intento — si reintentamos no acumulamos warmups.
+                if self._browsing and attempt == 1:
+                    self._browsing.warmup_in_group(group_id)
+
+                # --- Verificar estado de página post-warmup -----------------
+                challenge = self._detect_challenge()
+                if challenge == "banned":
+                    self._banned = True
+                    self._handle_banned(f"post_warmup({group_id})")
+                    return False
+                if challenge != "clear":
+                    self.logger.warning(
+                        "[Publish] Desafío post-warmup en grupo %s: %s", group_id, challenge)
+                    if not self._wait_for_manual_resolution():
+                        continue
+
+                # También verificar salud general (error page, login redirect)
+                health = self._check_page_health("post_warmup")
+                if health != "ok":
+                    self.logger.warning(
+                        "[Publish] Página con estado '%s' post-warmup — reintentando", health)
                     continue
 
                 # --- Abrir compositor del grupo (NO campo de comentarios) ---
