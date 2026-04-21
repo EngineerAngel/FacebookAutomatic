@@ -793,17 +793,20 @@ class FacebookPoster:
                 # --- Abrir compositor del grupo (NO campo de comentarios) ---
                 self.logger.info("[Publish] Buscando compositor del grupo...")
                 composer = self._find_first([
-                    # Prioridad: compositor específico del grupo via data-pagelet
+                    # Placeholder visible en el compositor (confirmado en screenshot)
+                    "//span[text()='Escribe algo...']",
+                    "//span[text()='Write something...']",
+                    "//span[contains(text(),'Escribe algo')]",
+                    "//span[contains(text(),'Write something')]",
+                    # aria-label del div compositor
+                    "//div[@aria-label='Escribe algo...']",
+                    "//div[@aria-label='Write something...']",
+                    # Compositor via data-pagelet (algunos grupos)
                     "//div[@data-pagelet='GroupInlineComposer']//div[@role='button']",
-                    "//div[@data-pagelet='GroupInlineComposer']//span[contains(text(),'Escrib')]",
-                    "//div[@data-pagelet='GroupInlineComposer']//span[contains(text(),'Write')]",
-                    # aria-label del compositor de publicación
+                    # Botón Crear publicación
                     "//div[@aria-label='Crear publicación']",
                     "//div[@aria-label='Create post']",
-                    "//div[@aria-label='Crear una publicación']",
-                    # Fallback: botón con texto específico de compositor
                     "//span[contains(text(),'Crear publicaci')]",
-                    "//span[contains(text(),'Create public post')]",
                 ], timeout=15)
                 self._human_click(composer)
                 self.human_wait(2, 4)
@@ -818,8 +821,8 @@ class FacebookPoster:
                 ], timeout=10)
 
                 # --- Escribir en el editor DENTRO del modal ----------------
-                # Usar .// (relativo) para buscar solo dentro del modal
-                editor = modal.locator(".//div[@contenteditable='true']").first
+                # xpath= prefix requerido para XPath en locator encadenado
+                editor = modal.locator("xpath=.//div[@contenteditable='true']").first
                 editor.wait_for(state="visible", timeout=5000)
                 self._human_click(editor)
                 self.human_wait(0.5, 1)
