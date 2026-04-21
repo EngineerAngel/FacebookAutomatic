@@ -790,25 +790,37 @@ class FacebookPoster:
                         return False
                     continue
 
-                # --- Abrir compositor -----------------------------------
+                # --- Abrir compositor del grupo (NO campo de comentarios) ---
+                self.logger.info("[Publish] Buscando compositor del grupo...")
                 composer = self._find_first([
-                    "//span[contains(text(),'Escribe algo')]",
-                    "//span[contains(text(),'Write something')]",
-                    "//span[contains(text(),'¿Qué estás pensando')]",
-                    "//span[contains(text(),'What')]",
-                    "//div[@role='button'][contains(@aria-label,'post')]",
+                    # Prioridad: compositor específico del grupo via data-pagelet
                     "//div[@data-pagelet='GroupInlineComposer']//div[@role='button']",
+                    "//div[@data-pagelet='GroupInlineComposer']//span[contains(text(),'Escrib')]",
+                    "//div[@data-pagelet='GroupInlineComposer']//span[contains(text(),'Write')]",
+                    # aria-label del compositor de publicación
+                    "//div[@aria-label='Crear publicación']",
+                    "//div[@aria-label='Create post']",
+                    "//div[@aria-label='Crear una publicación']",
+                    # Fallback: botón con texto específico de compositor
+                    "//span[contains(text(),'Crear publicaci')]",
+                    "//span[contains(text(),'Create public post')]",
                 ], timeout=15)
                 self._human_click(composer)
                 self.human_wait(2, 4)
 
-                # --- Escribir en el editor del modal --------------------
-                editor = self._find_first([
-                    "//div[@role='dialog']//div[@contenteditable='true']",
-                    "//div[@contenteditable='true'][@data-lexical-editor='true']",
-                    "//div[@contenteditable='true'][contains(@class,'notranslate')]",
-                    "//div[@contenteditable='true']",
-                ], timeout=10, visible=False)
+                # --- Esperar el modal de publicación (NO comentario) --------
+                self.logger.info("[Publish] Esperando modal de publicacion...")
+                modal = self._find_first([
+                    "//div[@role='dialog'][.//div[@contenteditable='true']][.//div[@aria-label='Publicar' or @aria-label='Post']]",
+                    "//div[@role='dialog'][.//div[@contenteditable='true']][.//span[contains(text(),'Crear publicaci')]]",
+                    "//div[@role='dialog'][.//div[@contenteditable='true']][.//span[contains(text(),'Create post')]]",
+                    "//div[@role='dialog'][.//div[@contenteditable='true']]",
+                ], timeout=10)
+
+                # --- Escribir en el editor DENTRO del modal ----------------
+                # Usar .// (relativo) para buscar solo dentro del modal
+                editor = modal.locator(".//div[@contenteditable='true']").first
+                editor.wait_for(state="visible", timeout=5000)
                 self._human_click(editor)
                 self.human_wait(0.5, 1)
                 self._human_type(editor, text)
@@ -823,27 +835,26 @@ class FacebookPoster:
                 if image_path:
                     self._attach_image(image_path)
 
-                # --- Click Publicar (submit) ------------------------------
+                # --- Click Publicar (submit) dentro del modal --------------
                 pub_btn = self._find_first([
-                    "//div[@aria-label='Publicar']",
-                    "//div[@aria-label='Post']",
-                    "//button[@aria-label='Publicar']",
-                    "//button[@aria-label='Post']",
+                    "//div[@role='dialog']//div[@aria-label='Publicar']",
+                    "//div[@role='dialog']//div[@aria-label='Post']",
+                    "//div[@role='dialog']//button[@aria-label='Publicar']",
+                    "//div[@role='dialog']//button[@aria-label='Post']",
                     "//div[@role='dialog']//div[@role='button'][contains(@aria-label,'ublicar')]",
                     "//div[@role='dialog']//div[@role='button'][contains(@aria-label,'ost')]",
                 ], timeout=10)
                 self.human_wait(0.3, 0.8)
                 self._human_click(pub_btn)
 
-                # Wait for the modal to disappear as confirmation
-                self.page.wait_for_selector(
-                    "//div[@role='dialog']",
-                    state="detached",
-                    timeout=20000,
-                )
-                self.logger.info(
-                    "Published to group %s successfully", group_id
-                )
+                # Éxito: esperar que el botón Publicar desaparezca (modal cerrado)
+                # NO usar //div[@role='dialog'] porque hay otros dialogs en la página
+                try:
+                    pub_btn.wait_for(state="detached", timeout=20000)
+                except Exception:
+                    self.human_wait(4, 6)
+
+                self.logger.info("Published to group %s successfully", group_id)
                 self._publish_count += 1
                 self._maybe_refresh_session()
                 return True
