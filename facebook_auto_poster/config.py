@@ -58,6 +58,31 @@ CONFIG: dict = {
     "refresh_every_n_posts": 10,
     "refresh_pause_min": 60,
     "refresh_pause_max": 120,
+    # ---- Calentamiento humano antes de publicar ------------------------
+    "human_browsing_enabled": True,
+    "warmup_probability": 0.60,                 # % de grupos con warmup
+    "warmup_scrolls_min": 2,
+    "warmup_scrolls_max": 5,
+    "warmup_hover_probability": 0.5,            # hover sobre 1 publicación
+    "warmup_open_comments_probability": 0.3,    # abrir 1 hilo de comentarios
+    "warmup_duration_min": 8,                   # segundos mínimos en el feed
+    "warmup_duration_max": 25,
+    # ---- Gemini commenter (publicaciones ajenas durante warmup) --------
+    "gemini_comment_enabled": True,
+    "gemini_comment_probability": 0.20,         # % de warmups que comentan
+    "gemini_comment_max_per_session": 2,        # tope por cuenta por run
+    "gemini_comment_lang": "es-MX",
+    "gemini_timeout": 15,                       # timeout blando entre reintentos (s)
+    # Cuota diaria por cuenta — target aleatorio determinista (account, día)
+    "gemini_daily_min": 1,
+    "gemini_daily_max": 3,
+    # Tras un timeout duro (60s), no llamar a Gemini durante X segundos.
+    # Si la respuesta tardía llega antes, el cooldown se levanta automáticamente.
+    "gemini_degraded_cooldown_s": 300,
+    # Claves primarias separadas por coma. Rota automáticamente si agota quota.
+    # Formato: "clave1,clave2,clave3" (sin espacios).
+    "gemini_api_keys": os.getenv("GEMINI_API_KEYS", os.getenv("GEMINI_API_KEY", "")).split(","),
+    "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip(),
 }
 
 

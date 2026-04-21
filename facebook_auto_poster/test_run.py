@@ -62,6 +62,23 @@ def main() -> None:
 
     logger.info("Texto de publicación:\n%s\n", text)
 
+    # Buscar imagen de prueba (imagen.jpg/png en el directorio, o primera de uploaded_images/)
+    image_path = None
+    base = Path(__file__).resolve().parent
+    for candidate in [base / "imagen.jpg", base / "imagen.png"]:
+        if candidate.exists():
+            image_path = str(candidate)
+            break
+    if not image_path:
+        uploads = sorted((base / "uploaded_images").glob("*.png")) + \
+                  sorted((base / "uploaded_images").glob("*.jpg"))
+        if uploads:
+            image_path = str(uploads[0])
+    if image_path:
+        logger.info("Imagen adjunta: %s\n", image_path)
+    else:
+        logger.info("Sin imagen (coloca imagen.jpg en el directorio para probar)\n")
+
     # Usar solo el primer grupo para testing
     if account.groups:
         test_group = account.groups[0]
@@ -79,7 +96,7 @@ def main() -> None:
         sys.exit(0)
 
     # Ejecutar para esta cuenta única
-    manager = AccountManager([account], CONFIG, text)
+    manager = AccountManager([account], CONFIG, text, image_path=image_path)
     logger.info("\nIniciando sesión de publicación...\n")
     try:
         results = manager.run()

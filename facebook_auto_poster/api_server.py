@@ -35,7 +35,7 @@ from functools import wraps
 from pathlib import Path
 
 from flask import (Flask, jsonify, redirect, render_template,
-                   request, session)
+                   request, send_from_directory, session)
 
 from config import CONFIG, load_accounts
 from account_manager import AccountManager
@@ -48,6 +48,14 @@ app = Flask(__name__)
 @app.get("/")
 def root():
     return redirect("/admin")
+
+@app.get("/sw.js")
+def service_worker():
+    return send_from_directory("static", "sw.js", mimetype="application/javascript")
+
+@app.get("/manifest.json")
+def manifest():
+    return send_from_directory("static", "manifest.json", mimetype="application/manifest+json")
 
 # ---------------------------------------------------------------------------
 # Claves y configuración de seguridad

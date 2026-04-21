@@ -87,10 +87,20 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS gemini_usage (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_name TEXT NOT NULL,
+                used_at      TEXT NOT NULL,
+                group_id     TEXT,
+                success      INTEGER NOT NULL DEFAULT 1
+            );
+
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_jobs_scheduled ON jobs(scheduled_for)
                 WHERE type = 'scheduled';
             CREATE INDEX IF NOT EXISTS idx_login_events_account ON login_events(account_name);
+            CREATE INDEX IF NOT EXISTS idx_gemini_usage_account_date
+                ON gemini_usage(account_name, used_at);
         """)
 
         # Migraciones seguras — no fallan si la columna ya existe
@@ -245,6 +255,37 @@ def get_recent_logins(limit: int = 50) -> list[dict]:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Gemini usage — cuota diaria por cuenta
+# ---------------------------------------------------------------------------
+def record_gemini_use(
+    account_name: str,
+    group_id: str | None = None,
+    success: bool = True,
+) -> None:
+    """Inserta un evento de uso de Gemini para esta cuenta."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO gemini_usage (account_name, used_at, group_id, success)
+               VALUES (?,?,?,?)""",
+            (account_name, now, group_id, int(success)),
+        )
+
+
+def count_gemini_uses_today(account_name: str) -> int:
+    """Cuenta usos exitosos del día actual (zona local) para esta cuenta."""
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM gemini_usage
+               WHERE account_name=?
+                 AND success=1
+                 AND date(used_at)=date('now','localtime')""",
+            (account_name,),
+        ).fetchone()
+        return int(row["n"]) if row else 0
 
 
 # ---------------------------------------------------------------------------

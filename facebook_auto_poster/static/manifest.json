@@ -1,0 +1,13 @@
+{
+  "name": "Facebook Auto-Poster",
+  "short_name": "FB Poster",
+  "description": "Panel de administración y publicación",
+  "start_url": "/admin/publish",
+  "display": "standalone",
+  "background_color": "#0f1117",
+  "theme_color": "#6366f1",
+  "icons": [
+    { "src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
