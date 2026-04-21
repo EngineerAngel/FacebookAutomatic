@@ -2,46 +2,46 @@
 
 ## Sanity Checks (Pre-Facebook)
 
-- [ ] Imports sin errores: `python -c "from facebook_poster import FacebookPoster"`
-- [ ] CONFIG keys presentes: `emunium_enabled` y `browser_window_position`
-- [ ] `main.py` arranca sin `NotImplementedError` (event loop policy OK)
-- [ ] Browser abre visible en (0,0) al instanciar `FacebookPoster`
-- [ ] `poster.close()` no deja procesos `chrome.exe` zombies
+- [x] Imports sin errores: `python -c "from facebook_poster import FacebookPoster"`
+- [x] CONFIG keys presentes: `emunium_enabled` y `browser_window_position`
+- [x] `main.py` arranca sin `NotImplementedError` (event loop policy OK)
+- [x] Browser abre visible en (0,0) al instanciar `FacebookPoster`
+- [x] `poster.close()` no deja procesos `chrome.exe` zombies
 
 ## Setup Interactive (setup_accounts.py)
 
-- [ ] Corre sin imports de Selenium: `python setup_accounts.py cuenta_test`
-- [ ] Abre login page sin errores
-- [ ] Intenta restaurar cookies si existen
-- [ ] Espera ENTER del usuario después del login manual
-- [ ] Guarda cookies en DB después de confirmar sesión
+- [x] Corre sin imports de Selenium
+- [x] Abre login page sin errores
+- [x] Intenta restaurar cookies si existen (confirmado: carmen restauró 7 cookies)
+- [x] Espera ENTER del usuario después del login manual
+- [x] Guarda cookies en DB después de confirmar sesión
 
 ## Login Flow
 
-- [ ] Login con cookies existentes (sin pasar por formulario)
-- [ ] Login con email/password (cookies borradas primero)
+- [x] Login con cookies existentes (sin pasar por formulario)
+- [x] Login con email/password (carmen: login + 2FA exitosos)
 - [ ] Typos falsos (5%) + palabras fantasma (5%) no corrompen credenciales
 
 ## Publicación Básica
 
-- [ ] Publicar texto en 1 grupo
-- [ ] Publicar texto + imagen en 1 grupo
-- [ ] Thumbnail aparece después de `set_input_files`
-- [ ] Publicación exitosa sin errores
+- [x] Publicar texto en 1 grupo (zarai, 2 tests exitosos)
+- [x] Publicar texto + imagen en 1 grupo (zarai, imagen enviada con `set_input_files`)
+- [ ] Thumbnail aparece después de `set_input_files` (warning: timeout — ver Bug #4)
+- [x] Publicación exitosa sin errores
 
 ## Human Simulation
 
 - [ ] Log muestra `[Idle]` ~20% de probabilidad entre grupos
-- [ ] Clicks se ejecutan vía Emunium (con `move_to` + delay)
+- [x] Clicks se ejecutan vía Emunium (log: `[Emunium] Activo offset=0,85`)
 - [ ] Typing se ejecuta con delays entre caracteres (no instantáneo)
-- [ ] Text variation con zero-width chars se aplica
+- [x] Text variation con zero-width chars se aplica (log: `Text variation applied`)
 
 ## Detection & Evasion
 
 - [ ] **CAPTCHA**: aparece → `_wait_for_manual_resolution` se activa
 - [ ] **Soft-ban**: "temporarily blocked" → `_detect_challenge()` retorna `"banned"`, `_banned=True`
 - [ ] **Checkpoint**: detectado como checkpoint → retries abortan
-- [ ] Screenshots guardados en `screenshots/{account}/` en errores
+- [x] Screenshots guardados en `screenshots/{account}/` en errores (confirmado)
 
 ## Session Refresh
 
@@ -63,17 +63,17 @@
 
 ## Regression Detection
 
-- [ ] `job_store.save/load_cookies` funciona con formato Playwright
-- [ ] `record_login` registra suceso en BD
+- [x] `job_store.save/load_cookies` funciona con formato Playwright
+- [x] `record_login` registra suceso en BD
 - [ ] API `/post` y `/schedule` funcionan end-to-end
-- [ ] Logs contienen prefijos correctos: `[Login]`, `[Publish]`, `[BANNED]`, `[Refresh]`, `[Idle]`, `[CAPTCHA]`
-- [ ] `page.screenshot()` captura errores correctamente
+- [x] Logs contienen prefijos: `[Login]`, `[Cookies]`, `[Driver]`, `[Publish]`
+- [x] `page.screenshot()` captura errores correctamente
 
 ## Configuration
 
-- [ ] `browser_window_position = (0, 0)` sincroniza Emunium
-- [ ] `emunium_enabled = True/False` toggle funciona
-- [ ] `post_hours_allowed = range(0, 24)` para testing (REVERTIR antes de prod)
+- [x] `browser_window_position = (0, 0)` sincroniza Emunium
+- [x] `emunium_enabled = True` activo
+- [x] `post_hours_allowed = range(0, 24)` para testing
 - [ ] Fallback a Patchright puro cuando `emunium_enabled = False`
 
 ## Edge Cases
@@ -85,9 +85,18 @@
 
 ---
 
-## Notes
+## Bugs encontrados y corregidos
 
-- **Critical:** Revert `post_hours_allowed` to `range(6, 23)` before production
-- **Headless mode:** Set `browser_headless = True` + `emunium_enabled = False` for CI/Docker
-- **Multiprocess:** Each process spawns own Patchright — expect slower startup than Selenium
-- **Windows:** If Emunium fails (accessibility perms), fallback to `emunium_enabled = False` is automatic
+| # | Descripción | Estado |
+|---|---|---|
+| 1 | Publicación se hacía en campo de comentarios (selector muy genérico) | Corregido `0e98b89` |
+| 2 | Loop infinito post-publicación (esperaba dialog genérico) | Corregido `0e98b89` |
+| 3 | Event loop policy innecesaria en Python 3.13 Windows | Corregido `82162c0` |
+| 4 | Thumbnail selector con backslashes en lugar de `//` — timeout pero publish OK | Investigando |
+
+## Notas
+
+- **Cuenta carmen:** soft-ban activo (posts desaparecen al refrescar). Usar otra cuenta para continuar testing.
+- **Critical:** Revert `post_hours_allowed` a `range(6, 23)` antes de producción.
+- **Headless mode:** `browser_headless = True` + `emunium_enabled = False` para CI/Docker.
+- **Multiprocess:** Cada proceso lanza su propio Patchright — startup más lento que Selenium.

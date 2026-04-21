@@ -301,27 +301,101 @@ class FacebookPoster:
         except Exception:
             self.logger.warning("Failed to save screenshot %s", path, exc_info=True)
 
-    def _attach_image(self, image_path: str) -> None:
-        """Adjunta imagen al compositor usando el input file oculto.
-
-        Patchright maneja inputs ocultos nativamente — no hace falta el
-        display:block via JS como en Selenium.
-        """
+    def _attach_image(self, image_path: str) -> bool:
+        """Adjunta imagen al compositor. Devuelve True si el thumbnail se confirma."""
         abs_path = os.path.abspath(image_path)
 
-        self.page.set_input_files("//input[@type='file']", abs_path, timeout=15000)
+        # 1) Intentar abrir el selector de foto/video dentro del modal
+        try:
+            photo_btn = self.page.locator(
+                "//div[@role='dialog']//div["
+                "@aria-label='Foto/video' or @aria-label='Photo/video' "
+                "or @aria-label='Agregar fotos/videos' or @aria-label='Add photos/videos' "
+                "or @aria-label='Foto/Video']"
+            ).first
+            photo_btn.wait_for(state="visible", timeout=5000)
+            self._human_click(photo_btn)
+            self.human_wait(1, 2)
+            self.logger.info("[Image] Botón Foto/Video clickeado")
+        except Exception:
+            self.logger.debug("[Image] Sin botón Foto/Video — intentando input directo")
+
+        # 2) Enviar archivo al input (preferir el del dialog, fallback global)
+        try:
+            file_input = self.page.locator("//div[@role='dialog']//input[@type='file']").first
+            file_input.set_input_files(abs_path, timeout=15000)
+        except Exception:
+            self.page.set_input_files("//input[@type='file']", abs_path, timeout=15000)
         self.logger.info("[Image] Archivo enviado al input: %s", abs_path)
 
-        # Esperar thumbnail
+        # 3) Esperar señal de upload en progreso (opcional, no bloquea)
         try:
             self.page.locator(
-                "//div[@role='dialog']//img[contains(@src,'blob:') "
-                "or contains(@src,'scontent')]"
-            ).first.wait_for(state="visible", timeout=15000)
-            self.logger.info("[Image] Thumbnail de imagen cargado correctamente")
+                "//div[@role='dialog']//div[@role='progressbar']"
+            ).first.wait_for(state="visible", timeout=5000)
+            self.logger.info("[Image] Upload en progreso...")
+            # Esperar que el progressbar desaparezca
+            self.page.locator(
+                "//div[@role='dialog']//div[@role='progressbar']"
+            ).first.wait_for(state="hidden", timeout=30000)
+            self.logger.info("[Image] Upload completado")
         except Exception:
-            self.logger.warning("[Image] Timeout esperando thumbnail — continuando igual")
-            self.human_wait(3, 5)
+            pass  # progressbar no siempre aparece
+
+        # 4) Verificar thumbnail con múltiples selectores
+        thumbnail_selectors = [
+            "//div[@role='dialog']//img[contains(@src,'blob:')]",
+            "//div[@role='dialog']//img[contains(@src,'scontent')]",
+            "//div[@role='dialog']//img[contains(@src,'fbcdn')]",
+            # div con imagen de fondo (Facebook a veces usa background-image)
+            "//div[@role='dialog']//div[contains(@style,'blob:')]",
+            "//div[@role='dialog']//div[@aria-label and .//img]",
+        ]
+        for sel in thumbnail_selectors:
+            try:
+                self.page.locator(sel).first.wait_for(state="visible", timeout=8000)
+                self.logger.info("[Image] Thumbnail confirmado con: %s", sel)
+                self.human_wait(1, 2)
+                return True
+            except Exception:
+                continue
+
+        # No se detectó thumbnail — screenshot diagnóstico
+        self.logger.warning("[Image] Thumbnail NO detectado. Guardando diagnóstico...")
+        self._screenshot("image_no_thumbnail.png")
+        self.human_wait(4, 6)
+        return False
+
+    def _check_page_health(self, context: str = "") -> str:
+        """Verifica si la página tiene errores o fue recargada inesperadamente.
+
+        Devuelve: 'ok' | 'error' | 'reload' | 'login_required'
+        """
+        url = self.page.url
+        # Redirigido a login
+        if "login" in url or "checkpoint" in url:
+            self.logger.warning("[Health%s] Página redirigida a login/checkpoint: %s",
+                                f":{context}" if context else "", url)
+            return "login_required"
+
+        # Mensajes de error visibles en la página
+        error_indicators = [
+            "//div[contains(text(),'algo salió mal') or contains(text(),'something went wrong')]",
+            "//span[contains(text(),'algo salió mal') or contains(text(),'something went wrong')]",
+            "//div[contains(text(),'Volver a intentar') or contains(text(),'Try again')]",
+            "//a[contains(text(),'Volver a cargar') or contains(text(),'Reload')]",
+        ]
+        for sel in error_indicators:
+            try:
+                if self.page.locator(sel).first.is_visible():
+                    self.logger.warning("[Health%s] Error detectado en página: %s",
+                                        f":{context}" if context else "", sel)
+                    self._screenshot(f"page_error_{context or 'unknown'}.png")
+                    return "error"
+            except Exception:
+                pass
+
+        return "ok"
 
     def _dismiss_link_preview(self) -> None:
         """Cierra la previsualización de link que Facebook genera automáticamente."""
@@ -836,7 +910,24 @@ class FacebookPoster:
 
                 # --- Adjuntar imagen si se proporcionó --------------------
                 if image_path:
-                    self._attach_image(image_path)
+                    img_ok = self._attach_image(image_path)
+                    if not img_ok:
+                        # Verificar si la página tuvo error durante el upload
+                        health = self._check_page_health("after_image")
+                        if health != "ok":
+                            self.logger.warning(
+                                "[Image] Salud de página: %s — reintentando", health)
+                            continue
+                        self.logger.warning(
+                            "[Image] Continuando sin confirmación de thumbnail")
+
+                # --- Verificar salud antes de publicar ---------------------
+                health = self._check_page_health("before_publish")
+                if health != "ok":
+                    self.logger.warning(
+                        "[Publish] Página con estado %s antes de publicar — reintentando",
+                        health)
+                    continue
 
                 # --- Click Publicar (submit) dentro del modal --------------
                 pub_btn = self._find_first([
@@ -852,10 +943,32 @@ class FacebookPoster:
 
                 # Éxito: esperar que el botón Publicar desaparezca (modal cerrado)
                 # NO usar //div[@role='dialog'] porque hay otros dialogs en la página
+                modal_closed = False
                 try:
                     pub_btn.wait_for(state="detached", timeout=20000)
+                    modal_closed = True
                 except Exception:
                     self.human_wait(4, 6)
+
+                # Verificar salud post-publicación
+                post_health = self._check_page_health("after_publish")
+                if post_health == "error":
+                    self.logger.error(
+                        "[Publish] Error de página detectado después de publicar en %s",
+                        group_id)
+                    self._screenshot(f"post_publish_error_{group_id}.png")
+                    continue
+                if post_health == "login_required":
+                    self.logger.error(
+                        "[Publish] Sesión perdida después de publicar en %s", group_id)
+                    continue
+
+                if not modal_closed:
+                    # Modal sigue abierto — publicación probablemente no ocurrió
+                    self.logger.warning(
+                        "[Publish] Modal no cerró para grupo %s — reintentando", group_id)
+                    self._screenshot(f"modal_stuck_{group_id}.png")
+                    continue
 
                 self.logger.info("Published to group %s successfully", group_id)
                 self._publish_count += 1
@@ -870,6 +983,7 @@ class FacebookPoster:
                     exc_info=True,
                 )
                 self._screenshot(f"error_{group_id}.png")
+                self._check_page_health(f"exception_attempt_{attempt}")
 
         self.logger.error(
             "All %d attempts exhausted for group %s",
