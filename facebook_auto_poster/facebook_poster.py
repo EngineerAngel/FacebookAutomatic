@@ -305,28 +305,46 @@ class FacebookPoster:
         """Adjunta imagen al compositor. Devuelve True si el thumbnail se confirma."""
         abs_path = os.path.abspath(image_path)
 
-        # 1) Intentar abrir el selector de foto/video dentro del modal
-        try:
-            photo_btn = self.page.locator(
-                "//div[@role='dialog']//div["
-                "@aria-label='Foto/video' or @aria-label='Photo/video' "
-                "or @aria-label='Agregar fotos/videos' or @aria-label='Add photos/videos' "
-                "or @aria-label='Foto/Video']"
-            ).first
-            photo_btn.wait_for(state="visible", timeout=5000)
-            self._human_click(photo_btn)
-            self.human_wait(1, 2)
-            self.logger.info("[Image] Botón Foto/Video clickeado")
-        except Exception:
-            self.logger.debug("[Image] Sin botón Foto/Video — intentando input directo")
+        # Localizar el botón Foto/Video dentro del modal
+        photo_btn_loc = self.page.locator(
+            "//div[@role='dialog']//div["
+            "@aria-label='Foto/video' or @aria-label='Photo/video' "
+            "or @aria-label='Agregar fotos/videos' or @aria-label='Add photos/videos' "
+            "or @aria-label='Foto/Video']"
+        ).first
 
-        # 2) Enviar archivo al input (preferir el del dialog, fallback global)
+        file_sent = False
+
+        # 1) Estrategia principal: expect_file_chooser intercepta el diálogo del OS
+        #    antes de que aparezca en pantalla → sin ventana emergente zombie.
         try:
-            file_input = self.page.locator("//div[@role='dialog']//input[@type='file']").first
-            file_input.set_input_files(abs_path, timeout=15000)
+            photo_btn_loc.wait_for(state="visible", timeout=5000)
+            with self.page.expect_file_chooser(timeout=5000) as fc_info:
+                self._human_click(photo_btn_loc)
+            fc_info.value.set_files(abs_path)
+            self.logger.info("[Image] Archivo enviado via FileChooser (sin diálogo OS)")
+            file_sent = True
         except Exception:
+            self.logger.debug("[Image] FileChooser no interceptado — usando set_input_files")
+
+        # 2) Fallback: set_input_files directo sobre el input del dialog
+        if not file_sent:
+            try:
+                file_input = self.page.locator(
+                    "//div[@role='dialog']//input[@type='file']"
+                ).first
+                file_input.set_input_files(abs_path, timeout=15000)
+                self.logger.info("[Image] Archivo enviado via set_input_files (dialog)")
+                file_sent = True
+            except Exception:
+                pass
+
+        # 3) Fallback global
+        if not file_sent:
             self.page.set_input_files("//input[@type='file']", abs_path, timeout=15000)
-        self.logger.info("[Image] Archivo enviado al input: %s", abs_path)
+            self.logger.info("[Image] Archivo enviado via set_input_files (global)")
+
+        self.logger.info("[Image] Ruta: %s", abs_path)
 
         # 3) Esperar señal de upload en progreso (opcional, no bloquea)
         try:
