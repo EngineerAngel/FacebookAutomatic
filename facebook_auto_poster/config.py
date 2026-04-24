@@ -7,6 +7,7 @@ on the first run before the DB is populated.
 """
 
 import json
+import logging
 import os
 import random
 import sys
@@ -15,6 +16,15 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
+
+try:
+    from crypto import decrypt_password as _decrypt_password
+    _CRYPTO_AVAILABLE = True
+except ImportError:
+    _decrypt_password = None  # type: ignore[assignment]
+    _CRYPTO_AVAILABLE = False
+
+_config_logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +108,7 @@ class AccountConfig:
     email: str
     password: str
     groups: list[str] = field(default_factory=list)
-    timezone: str = "America/Mexico_City"
+    timezone: str = "UTC"
     active_hours: tuple[int, int] = (7, 23)
     fingerprint: dict = field(default_factory=dict)
     log_file: str = ""
@@ -132,6 +142,23 @@ def is_account_hour_allowed(account: AccountConfig) -> bool:
     return start <= local_hour < end
 
 
+def _parse_active_hours(raw: str | None, account_name: str) -> tuple[int, int]:
+    """Parsea active_hours desde JSON. Usa default (7, 23) si el valor es inválido."""
+    try:
+        parsed = json.loads(raw or "[7, 23]")
+        start, end = int(parsed[0]), int(parsed[1])
+        if not (0 <= start <= 23 and 0 <= end <= 23):
+            raise ValueError(f"horas fuera de rango: {start}-{end}")
+        return (start, end)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "active_hours invalido para '%s' (%r) — usando default (7,23): %s",
+            account_name, raw, exc,
+        )
+        return (7, 23)
+
+
 # ---------------------------------------------------------------------------
 # load_accounts() — DB first, .env as fallback
 # ---------------------------------------------------------------------------
@@ -158,8 +185,9 @@ def load_accounts() -> list[AccountConfig]:
                 groups = json.loads(r["groups"]) if r.get("groups") else []
                 if not groups:
                     continue
-                active_hours_raw = r.get("active_hours") or "[7, 23]"
-                active_hours = tuple(json.loads(active_hours_raw))
+                active_hours = _parse_active_hours(
+                    r.get("active_hours"), r["name"]
+                )
 
                 fp_raw = r.get("fingerprint_json")
                 if fp_raw:
@@ -169,13 +197,33 @@ def load_accounts() -> list[AccountConfig]:
                     job_store.save_fingerprint(r["name"], json.dumps(fingerprint))
                 taken_ids.append(fingerprint["id"])
 
+                # --- Resolver contraseña por cuenta -------------------
+                # Prioridad: password_enc (Fernet) > FB_PASSWORD global
+                password = global_password
+                pw_enc = r.get("password_enc")
+                if pw_enc and _CRYPTO_AVAILABLE and _decrypt_password is not None:
+                    try:
+                        password = _decrypt_password(pw_enc)
+                    except Exception as exc:
+                        _config_logger.warning(
+                            "No se pudo descifrar password_enc para '%s' — "
+                            "usando FB_PASSWORD global. Error: %s",
+                            r["name"], exc,
+                        )
+                elif pw_enc and not _CRYPTO_AVAILABLE:
+                    _config_logger.warning(
+                        "Cuenta '%s' tiene password_enc pero 'cryptography' no está instalada — "
+                        "usando FB_PASSWORD global. Instala: pip install cryptography",
+                        r["name"],
+                    )
+
                 accounts.append(
                     AccountConfig(
                         name=r["name"],
                         email=r["email"],
-                        password=global_password,
+                        password=password,
                         groups=groups,
-                        timezone=r.get("timezone") or "America/Mexico_City",
+                        timezone=r.get("timezone") or "UTC",
                         active_hours=active_hours,
                         fingerprint=fingerprint,
                     )

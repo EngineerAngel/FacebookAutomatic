@@ -42,6 +42,12 @@ from config import CONFIG, load_accounts, pick_fingerprint
 from account_manager import AccountManager
 import job_store
 import webhook
+try:
+    from crypto import encrypt_password as _encrypt_password
+    _CRYPTO_AVAILABLE = True
+except ImportError:
+    _encrypt_password = None  # type: ignore[assignment]
+    _CRYPTO_AVAILABLE = False
 
 app = Flask(__name__)
 
@@ -484,7 +490,12 @@ def admin_panel():
 @app.get("/admin/api/accounts")
 @admin_required
 def admin_list_accounts():
-    return jsonify(job_store.list_accounts_full())
+    rows = job_store.list_accounts_full()
+    # Transformar: no exponer el token cifrado al frontend,
+    # solo indicar si la cuenta tiene una contraseña distinta a la principal.
+    for r in rows:
+        r["has_custom_password"] = bool(r.pop("password_enc", None))
+    return jsonify(rows)
 
 
 @app.post("/admin/api/accounts")
@@ -542,6 +553,60 @@ def admin_delete_account(name: str):
         return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
     logger.info("Cuenta '%s' eliminada via admin", name)
     return "", 204
+
+
+@app.post("/admin/api/accounts/<name>/password")
+@admin_required
+def admin_set_account_password(name: str):
+    """
+    Establece o elimina la contraseña individual de una cuenta.
+
+    - Body {"password": "<texto>"} → cifra y guarda (cuenta usará ésta)
+    - Body {"password": null} o {"password": ""} → borra la individual;
+      la cuenta vuelve a usar FB_PASSWORD (contraseña principal)
+
+    La contraseña nunca se loguea ni se retorna en claro.
+    El 98% de las cuentas usa la contraseña principal — solo configura
+    una individual para cuentas con credenciales distintas.
+    """
+    data = request.get_json(silent=True) or {}
+    plain = (data.get("password") or "").strip()
+
+    # --- Limpiar: restaurar contraseña principal global ---
+    if not plain:
+        found = job_store.clear_account_password(name)
+        if not found:
+            return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
+        logger.info("Password individual eliminado para '%s' — usará FB_PASSWORD", name)
+        return jsonify({
+            "status": "reset_to_default",
+            "account": name,
+            "message": "La cuenta ahora usa la contraseña principal (FB_PASSWORD)",
+        })
+
+    # --- Establecer contraseña individual ---
+    if not _CRYPTO_AVAILABLE or _encrypt_password is None:
+        return jsonify({
+            "error": "Módulo de cifrado no disponible. "
+                     "Instala: pip install cryptography"
+        }), 503
+
+    if len(plain) < 6:
+        return jsonify({"error": "La contraseña debe tener al menos 6 caracteres"}), 400
+    if len(plain) > 256:
+        return jsonify({"error": "La contraseña no puede superar 256 caracteres"}), 400
+
+    try:
+        encrypted = _encrypt_password(plain)
+    except Exception as exc:
+        logger.error("Error cifrando password para '%s': %s", name, exc)
+        return jsonify({"error": "Error interno al cifrar la contraseña"}), 500
+
+    if not job_store.set_account_password(name, encrypted):
+        return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
+
+    logger.info("Password individual configurado para cuenta '%s'", name)
+    return jsonify({"status": "updated", "account": name})
 
 
 # ===========================================================================

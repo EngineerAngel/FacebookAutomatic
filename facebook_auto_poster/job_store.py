@@ -111,6 +111,7 @@ def init_db() -> None:
             "ALTER TABLE accounts ADD COLUMN timezone TEXT NOT NULL DEFAULT 'America/Mexico_City'",
             "ALTER TABLE accounts ADD COLUMN active_hours TEXT NOT NULL DEFAULT '[7, 23]'",
             "ALTER TABLE accounts ADD COLUMN fingerprint_json TEXT",
+            "ALTER TABLE accounts ADD COLUMN password_enc TEXT",
         ]:
             try:
                 conn.execute(stmt)
@@ -160,11 +161,41 @@ def list_accounts_full() -> list[dict]:
     with _lock, _connect() as conn:
         rows = conn.execute(
             """SELECT name, email, groups, timezone, active_hours, fingerprint_json,
-                      created_at, last_login_at, last_published_at
+                      password_enc, created_at, last_login_at, last_published_at
                FROM accounts WHERE is_active=1
                ORDER BY name ASC"""
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def set_account_password(account_name: str, password_enc: str) -> bool:
+    """
+    Persiste la contraseña cifrada de una cuenta.
+
+    Retorna True si la cuenta existía y fue actualizada, False si no existe.
+    El llamador es responsable de cifrar el valor antes de pasarlo.
+    """
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "UPDATE accounts SET password_enc=? WHERE name=? AND is_active=1",
+            (password_enc, account_name),
+        )
+        return cur.rowcount > 0
+
+
+def clear_account_password(account_name: str) -> bool:
+    """
+    Elimina la contraseña individual de una cuenta (escribe NULL en password_enc).
+
+    Después de esto la cuenta usará FB_PASSWORD global en load_accounts().
+    Retorna True si la cuenta existía.
+    """
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "UPDATE accounts SET password_enc=NULL WHERE name=? AND is_active=1",
+            (account_name,),
+        )
+        return cur.rowcount > 0
 
 
 def create_account(name: str, email: str, groups: list[str],

@@ -1,13 +1,13 @@
 # Avance — Fase 1: Stop-the-bleeding
 
-> Última actualización: 2026-04-23
+> Última actualización: 2026-04-24
 
 ## Estado general
 
 | # | Ítem | Estado | Completado |
 |---|------|--------|-----------|
 | 1.1 | SIM hotspot pool con resiliencia | ⏳ Pendiente | — |
-| 1.2 | Password individual cifrada | ⏳ Pendiente | — |
+| 1.2 | Password individual cifrada | ✅ Completado | 2026-04-24 |
 | 1.3 | Fingerprint variation (UA + viewport + locale + TZ) | ✅ Completado | 2026-04-23 |
 | 1.4 | Ventana horaria realista + timezone por cuenta | ✅ Completado | 2026-04-23 |
 | 1.5 | Bajar typo rate y mejorar patrón de corrección | ✅ Completado | 2026-04-23 |
@@ -51,15 +51,45 @@
 
 ---
 
-### ⏳ 1.2 — Password individual cifrada
+### ✅ 1.2 — Password individual cifrada
 
-**Pendiente:**
-- [ ] Crear `crypto.py` con Fernet
-- [ ] Migración: `ALTER TABLE accounts ADD COLUMN password_enc TEXT`
-- [ ] Script `migrate_passwords.py` (toma `FB_PASSWORD` global → cifra por cuenta)
-- [ ] Endpoint `POST /admin/api/accounts/<name>/password`
-- [ ] `load_accounts()` descifra al construir `AccountConfig`
-- [ ] Añadir `.secret.key` a `.gitignore`
+**Cambios realizados:**
+- [x] Creado `crypto.py` — Fernet wrapper: `encrypt_password()` / `decrypt_password()`
+  - Clave maestra en `.secret.key` (auto-generada en primer uso, `chmod 0o600`)
+  - Caché de instancia Fernet (no re-lee disco en cada llamada)
+  - `InvalidToken` propagado para detectar token corrompido o clave rotada
+- [x] Migración DB: `ALTER TABLE accounts ADD COLUMN password_enc TEXT` en `init_db()`
+- [x] `job_store.set_account_password()` — persiste token cifrado
+- [x] `job_store.clear_account_password()` — escribe NULL (vuelve a FB_PASSWORD global)
+- [x] `job_store.list_accounts_full()` — incluye `password_enc` en SELECT
+- [x] `config.load_accounts()` — resolución de contraseña: `password_enc` > `FB_PASSWORD`
+  - Fallback silencioso a global si token inválido (log WARNING)
+  - Fallback si `cryptography` no instalada (log WARNING, no rompe arranque)
+- [x] Endpoint `POST /admin/api/accounts/<name>/password`:
+  - `{"password": "<texto>"}` → cifra y guarda (contraseña propia)
+  - `{"password": null}` o vacío → limpia, vuelve a FB_PASSWORD
+  - Validación: mín 6 / máx 256 chars, 404 si cuenta no existe
+- [x] `GET /admin/api/accounts` → retorna `has_custom_password: bool` (no expone token)
+- [x] `admin.html` — selector visual en modal: 🔑 Principal / 🔒 Propia
+  - Campo de contraseña aparece solo si se elige "Propia"
+  - Columna "Contraseña" en tabla con badge por tipo
+- [x] `.secret.key` añadida a `.gitignore`
+- [x] `cryptography>=42.0.0` añadida a `requirements.txt`
+
+**Diseño adoptado (ajuste respecto al plan original):**
+- No se creó `migrate_passwords.py` — no es necesario: las cuentas sin `password_enc`
+  usan FB_PASSWORD automáticamente. La migración es opt-in por cuenta, no masiva.
+- El 98% de cuentas usa FB_PASSWORD (contraseña principal). Solo se configura
+  `password_enc` para las cuentas con credenciales distintas.
+
+**Criterios de aceptación:**
+- [x] `crypto.py` existe con `encrypt_password()` / `decrypt_password()`
+- [x] `.secret.key` se genera automáticamente y está en `.gitignore`
+- [x] `accounts` tiene columna `password_enc` nullable
+- [x] `load_accounts()` descifra si existe, usa FB_PASSWORD si no
+- [x] Endpoint funciona para set y reset
+- [x] Frontend muestra badge de tipo de contraseña
+- [x] 20/20 tests pasan (`test_item_1_2.py`)
 
 ---
 

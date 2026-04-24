@@ -1,5 +1,6 @@
 # Credentials — NEVER commit
 .env
+.secret.key
 cookies/
 
 # Runtime artifacts
