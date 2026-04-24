@@ -110,6 +110,7 @@ def init_db() -> None:
             "ALTER TABLE accounts ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE accounts ADD COLUMN timezone TEXT NOT NULL DEFAULT 'America/Mexico_City'",
             "ALTER TABLE accounts ADD COLUMN active_hours TEXT NOT NULL DEFAULT '[7, 23]'",
+            "ALTER TABLE accounts ADD COLUMN fingerprint_json TEXT",
         ]:
             try:
                 conn.execute(stmt)
@@ -158,7 +159,7 @@ def list_accounts_full() -> list[dict]:
     """Lista completa de cuentas activas con todos sus campos."""
     with _lock, _connect() as conn:
         rows = conn.execute(
-            """SELECT name, email, groups, timezone, active_hours,
+            """SELECT name, email, groups, timezone, active_hours, fingerprint_json,
                       created_at, last_login_at, last_published_at
                FROM accounts WHERE is_active=1
                ORDER BY name ASC"""
@@ -166,18 +167,29 @@ def list_accounts_full() -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def create_account(name: str, email: str, groups: list[str]) -> None:
+def create_account(name: str, email: str, groups: list[str],
+                   fingerprint_json: str | None = None) -> None:
     """Crea una cuenta nueva o reactiva una eliminada."""
     now = datetime.now().isoformat()
     with _lock, _connect() as conn:
         conn.execute(
-            """INSERT INTO accounts (name, email, groups, created_at, is_active)
-               VALUES (?, ?, ?, ?, 1)
+            """INSERT INTO accounts (name, email, groups, fingerprint_json, created_at, is_active)
+               VALUES (?, ?, ?, ?, ?, 1)
                ON CONFLICT(name) DO UPDATE SET
-                   email    = excluded.email,
-                   groups   = excluded.groups,
-                   is_active = 1""",
-            (name, email, json.dumps(groups), now),
+                   email          = excluded.email,
+                   groups         = excluded.groups,
+                   fingerprint_json = COALESCE(excluded.fingerprint_json, accounts.fingerprint_json),
+                   is_active      = 1""",
+            (name, email, json.dumps(groups), fingerprint_json, now),
+        )
+
+
+def save_fingerprint(account_name: str, fingerprint_json: str) -> None:
+    """Persiste el fingerprint asignado a una cuenta."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE accounts SET fingerprint_json=? WHERE name=?",
+            (fingerprint_json, account_name),
         )
 
 

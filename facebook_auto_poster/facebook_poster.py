@@ -158,27 +158,23 @@ class FacebookPoster:
     # Browser setup
     # ------------------------------------------------------------------ #
     def _build_browser(self) -> tuple[Browser, BrowserContext, Page]:
-        self.logger.info("[Driver] Construyendo browser Patchright para %s ...", self.account.name)
-
-        w, h = self.config["browser_window_size"]
+        fp = self.account.fingerprint
+        w, h = fp.get("viewport", [1280, 720])
         pos_x, pos_y = self.config.get("browser_window_position", (0, 0))
         headless = bool(self.config["browser_headless"])
+
+        self.logger.info("[Driver] Construyendo browser | cuenta=%s fp=%s",
+                         self.account.name, fp.get("id", "?"))
 
         args = [
             f"--window-position={pos_x},{pos_y}",
             f"--window-size={w},{h}",
             "--disable-notifications",
-            "--lang=es",
+            f"--lang={fp.get('locale', 'es-MX').split('-')[0]}",
         ]
 
         if headless:
             self.logger.info("[Driver] Modo headless activado")
-
-        user_agent = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        )
 
         try:
             browser = self._pw.chromium.launch(headless=headless, args=args)
@@ -187,15 +183,30 @@ class FacebookPoster:
             raise
 
         context = browser.new_context(
-            user_agent=user_agent,
+            user_agent=fp.get("user_agent"),
             viewport={"width": w, "height": h},
-            locale="es-ES",
+            locale=fp.get("locale", "es-MX"),
+            timezone_id=fp.get("timezone", "America/Mexico_City"),
+            color_scheme=fp.get("color_scheme", "light"),
+            extra_http_headers={
+                "sec-ch-ua": fp.get("sec_ch_ua", ""),
+                "sec-ch-ua-platform": fp.get("sec_ch_ua_platform", '"Windows"'),
+                "sec-ch-ua-mobile": "?0",
+            },
         )
-        # Timeout por defecto (ms) para operaciones que no lo especifiquen
         context.set_default_timeout(self.config.get("implicit_wait", 10) * 1000)
 
+        hw = fp.get("hardware_concurrency", 8)
+        dm = fp.get("device_memory", 8)
+        platform = fp.get("platform", "Win32")
+        context.add_init_script(f"""
+            Object.defineProperty(navigator, 'hardwareConcurrency', {{get: () => {hw}}});
+            Object.defineProperty(navigator, 'deviceMemory', {{get: () => {dm}}});
+            Object.defineProperty(navigator, 'platform', {{get: () => '{platform}'}});
+        """)
+
         page = context.new_page()
-        self.logger.info("[Driver] Patchright listo. URL inicial: %s", page.url or "(blank)")
+        self.logger.info("[Driver] Patchright listo | ua=%s...", fp.get("user_agent", "")[:50])
         return browser, context, page
 
     # ------------------------------------------------------------------ #

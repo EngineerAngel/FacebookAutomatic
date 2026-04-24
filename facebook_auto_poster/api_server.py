@@ -22,6 +22,7 @@ Endpoints admin (requieren autenticación con ADMIN_KEY):
     GET    /admin/api/history               → historial de logins
 """
 
+import json
 import logging
 import os
 import re
@@ -37,7 +38,7 @@ from pathlib import Path
 from flask import (Flask, jsonify, redirect, render_template,
                    request, send_from_directory, session)
 
-from config import CONFIG, load_accounts
+from config import CONFIG, load_accounts, pick_fingerprint
 from account_manager import AccountManager
 import job_store
 import webhook
@@ -498,8 +499,14 @@ def admin_create_account():
     if err:
         return jsonify({"error": err}), 400
 
-    job_store.create_account(name, email, groups)
-    logger.info("Cuenta '%s' creada via admin", name)
+    taken_ids = [
+        json.loads(r["fingerprint_json"])["id"]
+        for r in job_store.list_accounts_full()
+        if r.get("fingerprint_json")
+    ]
+    fp = pick_fingerprint(taken_ids)
+    job_store.create_account(name, email, groups, fingerprint_json=json.dumps(fp))
+    logger.info("Cuenta '%s' creada via admin | fp=%s", name, fp["id"])
     return jsonify({"status": "created", "name": name}), 201
 
 

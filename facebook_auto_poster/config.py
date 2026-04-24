@@ -8,6 +8,7 @@ on the first run before the DB is populated.
 
 import json
 import os
+import random
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -99,6 +100,7 @@ class AccountConfig:
     groups: list[str] = field(default_factory=list)
     timezone: str = "America/Mexico_City"
     active_hours: tuple[int, int] = (7, 23)
+    fingerprint: dict = field(default_factory=dict)
     log_file: str = ""
     screenshots_dir: str = ""
 
@@ -108,6 +110,19 @@ class AccountConfig:
             self.log_file = str(base / "logs" / f"{self.name}.log")
         if not self.screenshots_dir:
             self.screenshots_dir = str(base / "screenshots" / self.name)
+
+
+def load_fingerprints() -> list[dict]:
+    """Carga el catálogo de fingerprints desde fingerprints.json."""
+    path = Path(__file__).resolve().parent / "fingerprints.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def pick_fingerprint(taken_ids: list[str]) -> dict:
+    """Elige un fingerprint no asignado aún. Si todos están tomados, reutiliza al azar."""
+    catalog = load_fingerprints()
+    available = [fp for fp in catalog if fp["id"] not in taken_ids]
+    return random.choice(available if available else catalog)
 
 
 def is_account_hour_allowed(account: AccountConfig) -> bool:
@@ -138,12 +153,22 @@ def load_accounts() -> list[AccountConfig]:
         rows = job_store.list_accounts_full()
         if rows:
             accounts = []
+            taken_ids: list[str] = []
             for r in rows:
                 groups = json.loads(r["groups"]) if r.get("groups") else []
                 if not groups:
                     continue
                 active_hours_raw = r.get("active_hours") or "[7, 23]"
                 active_hours = tuple(json.loads(active_hours_raw))
+
+                fp_raw = r.get("fingerprint_json")
+                if fp_raw:
+                    fingerprint = json.loads(fp_raw)
+                else:
+                    fingerprint = pick_fingerprint(taken_ids)
+                    job_store.save_fingerprint(r["name"], json.dumps(fingerprint))
+                taken_ids.append(fingerprint["id"])
+
                 accounts.append(
                     AccountConfig(
                         name=r["name"],
@@ -152,6 +177,7 @@ def load_accounts() -> list[AccountConfig]:
                         groups=groups,
                         timezone=r.get("timezone") or "America/Mexico_City",
                         active_hours=active_hours,
+                        fingerprint=fingerprint,
                     )
                 )
             if accounts:

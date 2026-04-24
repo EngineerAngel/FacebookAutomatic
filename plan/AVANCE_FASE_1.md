@@ -8,7 +8,7 @@
 |---|------|--------|-----------|
 | 1.1 | SIM hotspot pool con resiliencia | ⏳ Pendiente | — |
 | 1.2 | Password individual cifrada | ⏳ Pendiente | — |
-| 1.3 | Fingerprint variation (UA + viewport + locale + TZ) | ⏳ Pendiente | — |
+| 1.3 | Fingerprint variation (UA + viewport + locale + TZ) | ✅ Completado | 2026-04-23 |
 | 1.4 | Ventana horaria realista + timezone por cuenta | ✅ Completado | 2026-04-23 |
 | 1.5 | Bajar typo rate y mejorar patrón de corrección | ✅ Completado | 2026-04-23 |
 | 1.6 | Migración cross-platform Windows → Ubuntu/Mac | ⏳ Pendiente | — |
@@ -63,15 +63,26 @@
 
 ---
 
-### ⏳ 1.3 — Fingerprint variation (UA + viewport + locale + TZ)
+### ✅ 1.3 — Fingerprint variation (UA + viewport + locale + TZ)
 
-**Pendiente:**
-- [ ] Crear `fingerprints.json` con catálogo de 10+ perfiles realistas (Chrome 132+)
-- [ ] Migración: `ALTER TABLE accounts ADD COLUMN fingerprint_json TEXT`
-- [ ] Función de asignación de fingerprint al crear cuenta
-- [ ] Aplicar fingerprint en `_build_browser()` (UA, viewport, locale, timezone_id, sec-ch-ua)
-- [ ] Inyectar `hardwareConcurrency` y `deviceMemory` via `add_init_script`
-- [ ] Verificar con https://bot.sannysoft.com/ y https://amiunique.org/
+**Cambios realizados:**
+- [x] Creado `fingerprints.json` con 15 perfiles realistas (Chrome 130-132, 6 locales LATAM+ES)
+- [x] Migración DB: columna `fingerprint_json TEXT` en tabla `accounts`
+- [x] `job_store.save_fingerprint()` — persiste fingerprint asignado
+- [x] `job_store.create_account()` — acepta `fingerprint_json` al crear
+- [x] `config.load_fingerprints()` + `pick_fingerprint()` — selección sin duplicados
+- [x] `load_accounts()` — parsea fingerprint de DB; asigna y persiste si falta
+- [x] `_build_browser()` en `facebook_poster.py` reescrito completamente:
+  - UA por cuenta (ya no Chrome/124 hardcodeado)
+  - viewport, locale, timezone_id, color_scheme por cuenta
+  - `sec-ch-ua` + `sec-ch-ua-platform` + `sec-ch-ua-mobile` headers
+  - `add_init_script` para `hardwareConcurrency`, `deviceMemory`, `platform`
+- [x] `api_server.py` — asigna fingerprint único al crear cuenta via admin
+- [x] Validación: 3 cuentas activas con fp únicos, Chrome/124 eliminado de todos los UA
+
+**Pendiente (manual):**
+- [ ] Verificar en https://bot.sannysoft.com/ con una cuenta real
+- [ ] Verificar en https://amiunique.org/ que cada cuenta da hash único
 
 ---
 
