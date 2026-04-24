@@ -108,6 +108,8 @@ def init_db() -> None:
             "ALTER TABLE job_results ADD COLUMN group_tag TEXT NOT NULL DEFAULT 'generico'",
             "ALTER TABLE accounts ADD COLUMN groups TEXT",
             "ALTER TABLE accounts ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE accounts ADD COLUMN timezone TEXT NOT NULL DEFAULT 'America/Mexico_City'",
+            "ALTER TABLE accounts ADD COLUMN active_hours TEXT NOT NULL DEFAULT '[7, 23]'",
         ]:
             try:
                 conn.execute(stmt)
@@ -156,7 +158,8 @@ def list_accounts_full() -> list[dict]:
     """Lista completa de cuentas activas con todos sus campos."""
     with _lock, _connect() as conn:
         rows = conn.execute(
-            """SELECT name, email, groups, created_at, last_login_at, last_published_at
+            """SELECT name, email, groups, timezone, active_hours,
+                      created_at, last_login_at, last_published_at
                FROM accounts WHERE is_active=1
                ORDER BY name ASC"""
         ).fetchall()

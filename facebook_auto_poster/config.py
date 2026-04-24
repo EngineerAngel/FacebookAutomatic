@@ -10,7 +10,9 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 
@@ -47,7 +49,7 @@ CONFIG: dict = {
     "implicit_wait": 10,
     "max_retries": 3,
     "text_variation_mode": True,
-    "post_hours_allowed": range(0, 24),  # TODO: revert to range(6, 23) after testing
+
     "execution_mode": os.getenv("EXECUTION_MODE", "sequential").strip().lower(),
     "api_port": int(os.getenv("API_PORT", "5000")),
     # Idle aleatorio entre publicaciones (simula distracción humana)
@@ -95,6 +97,8 @@ class AccountConfig:
     email: str
     password: str
     groups: list[str] = field(default_factory=list)
+    timezone: str = "America/Mexico_City"
+    active_hours: tuple[int, int] = (7, 23)
     log_file: str = ""
     screenshots_dir: str = ""
 
@@ -104,6 +108,13 @@ class AccountConfig:
             self.log_file = str(base / "logs" / f"{self.name}.log")
         if not self.screenshots_dir:
             self.screenshots_dir = str(base / "screenshots" / self.name)
+
+
+def is_account_hour_allowed(account: AccountConfig) -> bool:
+    """Verifica si la hora local de la cuenta está dentro de su ventana de publicación."""
+    local_hour = datetime.now(ZoneInfo(account.timezone)).hour
+    start, end = account.active_hours
+    return start <= local_hour < end
 
 
 # ---------------------------------------------------------------------------
@@ -131,12 +142,16 @@ def load_accounts() -> list[AccountConfig]:
                 groups = json.loads(r["groups"]) if r.get("groups") else []
                 if not groups:
                     continue
+                active_hours_raw = r.get("active_hours") or "[7, 23]"
+                active_hours = tuple(json.loads(active_hours_raw))
                 accounts.append(
                     AccountConfig(
                         name=r["name"],
                         email=r["email"],
                         password=global_password,
                         groups=groups,
+                        timezone=r.get("timezone") or "America/Mexico_City",
+                        active_hours=active_hours,
                     )
                 )
             if accounts:

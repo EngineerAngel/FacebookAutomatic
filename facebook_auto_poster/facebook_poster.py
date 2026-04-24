@@ -79,8 +79,6 @@ _CHROME_UI_Y_OFFSET = 85
 class FacebookPoster:
     """Drives a single Facebook session for one account using Patchright."""
 
-    # Pool de "palabras fantasma" para simular un tipeo humano con errores.
-    _FAKE_WORDS = ("aaa", "zzz", "hmm", "err")
     _TYPO_ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
     def __init__(self, account: AccountConfig, config: dict) -> None:
@@ -207,7 +205,7 @@ class FacebookPoster:
         time.sleep(random.uniform(min_s, max_s))
 
     def _human_type(self, locator, text: str) -> None:
-        """Tipea con delays humanos + typos falsos + palabras fantasma.
+        """Tipea con delays humanos log-normal + typos realistas con corrección agrupada.
 
         Asume que el locator ya está enfocado (hacer _human_click antes).
         Usa page.keyboard en vez de emunium.type_text para no depender del
@@ -216,49 +214,44 @@ class FacebookPoster:
         try:
             locator.click(timeout=5000)
         except Exception:
-            # Si no podemos clickear, intentamos enfocar igual
             try:
                 locator.focus(timeout=3000)
             except Exception:
                 pass
 
         kb = self.page.keyboard
-        chars_since_fake_word = 0
+        i = 0
+        while i < len(text):
+            char = text[i]
 
-        for char in text:
-            # Palabra fantasma en fronteras de espacio (cada ~10 chars)
-            if (
-                chars_since_fake_word >= 10
-                and char == " "
-                and random.random() < 0.05
-            ):
-                fake = random.choice(self._FAKE_WORDS)
-                for fc in fake:
-                    kb.type(fc)
-                    time.sleep(random.uniform(0.05, 0.15))
-                time.sleep(random.uniform(0.30, 0.60))
-                for _ in fake:
+            # Typo con corrección agrupada (1.5%, no en espacios)
+            if char != " " and random.random() < 0.015:
+                n_wrong = random.choices([1, 2, 3], weights=[70, 25, 5])[0]
+                wrong_chars = random.choices(self._TYPO_ALPHABET, k=n_wrong)
+                for wc in wrong_chars:
+                    kb.type(wc)
+                    time.sleep(random.uniform(0.06, 0.14))
+                time.sleep(random.uniform(0.25, 0.60))  # pausa de "darse cuenta"
+                for _ in range(n_wrong):
                     kb.press("Backspace")
-                    time.sleep(random.uniform(0.04, 0.10))
+                    time.sleep(random.uniform(0.03, 0.07))
                 time.sleep(random.uniform(0.10, 0.25))
-                chars_since_fake_word = 0
-
-            # Typo puntual: 5% chance de char incorrecto + corrección
-            if char != " " and random.random() < 0.05:
-                wrong = random.choice(self._TYPO_ALPHABET)
-                kb.type(wrong)
-                time.sleep(random.uniform(0.15, 0.35))
-                kb.press("Backspace")
-                time.sleep(random.uniform(0.08, 0.18))
 
             kb.type(char)
+
+            # Delay inter-char con distribución log-normal (más realista que uniform)
             if char == " ":
-                time.sleep(random.uniform(0.10, 0.30))
+                time.sleep(random.lognormvariate(-1.4, 0.4))
+            elif char in ".,;:!?":
+                time.sleep(random.lognormvariate(-1.5, 0.4))
             else:
-                time.sleep(random.uniform(0.05, 0.18))
-            if random.random() < 0.05:
-                time.sleep(random.uniform(0.30, 0.80))
-            chars_since_fake_word += 1
+                time.sleep(random.lognormvariate(-1.7, 0.35))
+
+            # Micro-pausa ocasional (2%, no 5%)
+            if random.random() < 0.02:
+                time.sleep(random.uniform(0.40, 1.10))
+
+            i += 1
 
     def _human_click(self, locator) -> None:
         """Mueve el mouse a un locator con curva Bézier vía Emunium y clickea.

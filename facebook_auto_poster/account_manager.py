@@ -8,10 +8,9 @@ import logging
 import multiprocessing
 import random
 import time
-from datetime import datetime
 from multiprocessing.managers import DictProxy
 
-from config import AccountConfig
+from config import AccountConfig, is_account_hour_allowed
 from facebook_poster import FacebookPoster
 
 # ---------------------------------------------------------------------------
@@ -137,16 +136,18 @@ class AccountManager:
     # Unified entry point
     # ------------------------------------------------------------------ #
     def run(self) -> dict[str, dict[str, bool]]:
-        # Guard: check allowed posting hours
-        current_hour = datetime.now().hour
-        if current_hour not in self.config["post_hours_allowed"]:
-            msg = (
-                f"Current hour ({current_hour}) is outside the allowed posting window "
-                f"{self.config['post_hours_allowed'].start}–"
-                f"{self.config['post_hours_allowed'].stop - 1}"
+        in_window = [a for a in self.accounts if is_account_hour_allowed(a)]
+        skipped = [a for a in self.accounts if not is_account_hour_allowed(a)]
+        for a in skipped:
+            logger.warning(
+                "Cuenta '%s' fuera de su horario local (tz=%s ventana=%s-%s) — saltando",
+                a.name, a.timezone, a.active_hours[0], a.active_hours[1],
             )
+        if not in_window:
+            msg = "Todas las cuentas están fuera de su horario permitido"
             logger.warning(msg)
             raise ValueError(msg)
+        self.accounts = in_window
 
         mode = self.config.get("execution_mode", "sequential")
         logger.info("Execution mode: %s", mode)

@@ -275,15 +275,6 @@ def _resolve_accounts(
     return accounts, None
 
 
-def _hour_allowed(hour: int) -> bool:
-    return hour in CONFIG["post_hours_allowed"]
-
-
-def _hours_range_str() -> str:
-    r = CONFIG["post_hours_allowed"]
-    return f"{r.start:02d}:00-{(r.stop - 1):02d}:59"
-
-
 def _run_job(job_id: str, accounts, text: str,
              image_path: str | None, callback_url: str | None) -> None:
     job_store.mark_running(job_id)
@@ -336,13 +327,6 @@ def handle_post():
         return jsonify(err[0]), err[1]
     assert payload is not None
 
-    current_hour = datetime.now().hour
-    if not _hour_allowed(current_hour):
-        return jsonify({
-            "error": f"Fuera del horario permitido ({_hours_range_str()})",
-            "current_hour": current_hour,
-        }), 403
-
     accounts, err = _resolve_accounts(payload["accounts"])
     if err:
         return jsonify(err[0]), err[1]
@@ -394,12 +378,6 @@ def create_schedule():
 
     if when <= datetime.now():
         return jsonify({"error": "'scheduled_for' debe ser en el futuro"}), 400
-
-    if not _hour_allowed(when.hour):
-        return jsonify({
-            "error": f"Fuera del horario permitido ({_hours_range_str()})",
-            "scheduled_hour": when.hour,
-        }), 400
 
     _, err = _resolve_accounts(payload["accounts"])
     if err:
@@ -627,13 +605,6 @@ def admin_post():
         return jsonify(err[0]), err[1]
     assert payload is not None
 
-    current_hour = datetime.now().hour
-    if not _hour_allowed(current_hour):
-        return jsonify({
-            "error": f"Fuera del horario permitido ({_hours_range_str()})",
-            "current_hour": current_hour,
-        }), 403
-
     accounts, err = _resolve_accounts(payload["accounts"])
     if err:
         return jsonify(err[0]), err[1]
@@ -684,12 +655,6 @@ def admin_create_schedule():
 
     if when <= datetime.now():
         return jsonify({"error": "'scheduled_for' debe ser en el futuro"}), 400
-
-    if not _hour_allowed(when.hour):
-        return jsonify({
-            "error": f"Fuera del horario permitido ({_hours_range_str()})",
-            "scheduled_hour": when.hour,
-        }), 400
 
     _, err = _resolve_accounts(payload["accounts"])
     if err:

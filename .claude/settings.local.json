@@ -7,7 +7,8 @@
       "Bash(python test_run.py)",
       "Bash(python -c \"from facebook_auto_poster.facebook_poster import FacebookPoster; print\\('[OK] Import OK'\\)\")",
       "Bash(python -c \"from facebook_poster import FacebookPoster; print\\('[OK]'\\)\")",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(python -)"
     ]
   }
 }
