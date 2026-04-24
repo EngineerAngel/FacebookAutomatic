@@ -11,7 +11,7 @@
 | 1.3 | Fingerprint variation (UA + viewport + locale + TZ) | ✅ Completado | 2026-04-23 |
 | 1.4 | Ventana horaria realista + timezone por cuenta | ✅ Completado | 2026-04-23 |
 | 1.5 | Bajar typo rate y mejorar patrón de corrección | ✅ Completado | 2026-04-23 |
-| 1.6 | Migración cross-platform Windows → Ubuntu/Mac | ⏳ Pendiente | — |
+| 1.6 | Migración cross-platform Windows → Ubuntu/Mac | ✅ Completado | 2026-04-24 |
 
 ---
 
@@ -152,4 +152,39 @@
 | CAPTCHAs | < 1 / 50 logins | Sin datos |
 | Fingerprint único por cuenta (amiunique.org) | ✓ | Pendiente 1.3 |
 | IPs distintas verificadas | 5 móviles | Pendiente 1.1 |
-| Startup limpio en Ubuntu/Mac | ✓ | Pendiente 1.6 |
+| Startup limpio en Ubuntu/Mac | ✓ | ✅ Completado 1.6 |
+
+---
+
+### ✅ 1.6 — Migración cross-platform Windows → Ubuntu/Mac
+
+**Cambios realizados:**
+- [x] `main.py` — nueva función `_find_cloudflared()` multiplataforma:
+  - Busca primero en PATH del sistema (`shutil.which`) — detecta brew/apt/winget
+  - Fallback a binario junto al proyecto por OS (`.exe` en Windows, sin extensión en Mac/Linux)
+  - Log con instrucciones de instalación específicas por OS si no se encuentra
+- [x] `main.py` — `start_cloudflared()` usa el nuevo mecanismo, thread nombrado `"cloudflared"`
+- [x] `.env.example` — eliminado `CHROMEDRIVER_PATH` (Patchright lo gestiona solo)
+- [x] `.env.example` — `CHROME_PROFILE_PATH` vacío con comentarios para Mac/Ubuntu/Windows
+- [x] `.env.example` — sin rutas personales hardcodeadas (`ag464`, `C:\Users\...`)
+- [x] `.gitignore` raíz — añadidos `*.exe`, `cloudflared`, `chromedriver`
+- [x] `setup.sh` — script unificado en raíz del proyecto:
+  - Detecta OS (`uname -s`) y arquitectura (`uname -m`)
+  - Instala dependencias Python + Patchright Chromium
+  - Instala cloudflared según OS (brew en Mac, curl en Ubuntu)
+  - Instala `python3-xlib` y `scrot` en Ubuntu (necesario para Emunium)
+  - Imprime próximos pasos al finalizar
+- [x] `test_item_1_6.py` — 17/17 tests pasan
+
+**Nota sobre producción (Mac/Ubuntu con pantalla física):**
+- `headless=False` + Emunium activo — máximo nivel anti-detección
+- No se necesita Xvfb (hay display físico)
+- Los binarios `.exe` no se versionarán más (`.gitignore` actualizado)
+
+**Criterios de aceptación:**
+- [x] `_find_cloudflared()` busca en PATH antes que en binario manual
+- [x] `.env.example` sin rutas Windows hardcodeadas
+- [x] `.gitignore` protege `*.exe`, `cloudflared`, `chromedriver`
+- [x] `setup.sh` existe y cubre Mac y Ubuntu
+- [x] `main.py` importa limpio sin referencias old-style
+- [x] 17/17 tests pasan (`test_item_1_6.py`)

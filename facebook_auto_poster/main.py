@@ -40,30 +40,72 @@ main_logger.addHandler(_ch)
 
 
 # ---------------------------------------------------------------------------
-# Cloudflared tunnel (acceso público con HTTPS)
+# Cloudflared tunnel — multiplataforma (Windows / Mac / Ubuntu)
 # ---------------------------------------------------------------------------
-def start_cloudflared(port: int) -> None:
-    """Inicia cloudflared en un thread separado."""
-    PROJECT_ROOT = Path(__file__).resolve().parent.parent
-    cloudflared_exe = PROJECT_ROOT / "cloudflared.exe"
+def _find_cloudflared() -> str | None:
+    """
+    Localiza el binario cloudflared según el OS.
 
-    if not cloudflared_exe.exists():
-        main_logger.warning("cloudflared.exe no encontrado en %s — saltando túnel público", PROJECT_ROOT)
+    Orden de búsqueda:
+      1. PATH del sistema (instalado via brew, apt, winget, etc.)
+      2. Binario junto a la raíz del proyecto (fallback manual)
+
+    Retorna la ruta como str, o None si no se encuentra.
+    """
+    import platform
+    import shutil
+
+    # 1. Buscar en PATH (preferido — instalación limpia)
+    which = shutil.which("cloudflared")
+    if which:
+        return which
+
+    # 2. Fallback: binario manual junto al proyecto
+    system = platform.system()
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    candidates = {
+        "Windows": PROJECT_ROOT / "cloudflared.exe",
+        "Darwin":  PROJECT_ROOT / "cloudflared",
+        "Linux":   PROJECT_ROOT / "cloudflared",
+    }
+    candidate = candidates.get(system)
+    if candidate and candidate.exists():
+        return str(candidate)
+
+    return None
+
+
+def start_cloudflared(port: int) -> None:
+    """Inicia cloudflared en un thread daemon separado."""
+    import platform
+
+    exe = _find_cloudflared()
+    if not exe:
+        system = platform.system()
+        install_hint = {
+            "Darwin":  "brew install cloudflared",
+            "Linux":   "sudo apt install cloudflared",
+            "Windows": "winget install Cloudflare.cloudflared  o colocar cloudflared.exe junto al proyecto",
+        }.get(system, "ver https://developers.cloudflare.com/cloudflared")
+        main_logger.warning(
+            "cloudflared no encontrado — túnel público desactivado. Instalar: %s",
+            install_hint,
+        )
         return
 
-    def run_tunnel():
+    def run_tunnel() -> None:
         try:
-            main_logger.info("Iniciando Cloudflare Tunnel (acceso HTTPS público)...")
+            main_logger.info("Iniciando Cloudflare Tunnel en http://localhost:%d ...", port)
             subprocess.run(
-                [str(cloudflared_exe), "tunnel", "--url", f"http://localhost:{port}"],
-                check=False
+                [exe, "tunnel", "--url", f"http://localhost:{port}"],
+                check=False,
             )
-        except Exception as e:
-            main_logger.error("Error en cloudflared: %s", e)
+        except Exception as exc:
+            main_logger.error("Error en cloudflared: %s", exc)
 
-    thread = threading.Thread(target=run_tunnel, daemon=True)
+    thread = threading.Thread(target=run_tunnel, daemon=True, name="cloudflared")
     thread.start()
-    time.sleep(2)  # Dar tiempo a cloudflared para mostrar la URL
+    time.sleep(2)
 
 
 # ---------------------------------------------------------------------------

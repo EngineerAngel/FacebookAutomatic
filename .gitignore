@@ -2,7 +2,11 @@
 .env
 .env.local
 facebook_auto_poster/.env
-CLAUDE.md
+
+# Binarios del sistema (no versionar)
+*.exe
+cloudflared
+chromedriver
 
 # Python
 __pycache__/
