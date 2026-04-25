@@ -132,25 +132,14 @@
 
 ---
 
-### ⏳ 1.6 — Migración cross-platform Windows → Ubuntu/Mac
-
-**Pendiente:**
-- [ ] Función `_find_cloudflared()` multiplataforma en `main.py`
-- [ ] Eliminar `chromedriver.exe` del repo (añadir a `.gitignore`)
-- [ ] Actualizar `.env.example` con `CHROME_PROFILE_PATH=` vacío
-- [ ] Crear `setup.sh` unificado para Ubuntu/Mac
-- [ ] Verificar startup limpio en Ubuntu y Mac
-
----
-
-## Métricas de validación de Fase 1 (al completar los 6 ítems)
+## Métricas de validación de Fase 1
 
 | Métrica | Target | Estado |
 |---------|--------|--------|
 | Tasa de login exitoso | > 95% | Sin datos |
 | Soft-bans detectados | 0 | Sin datos |
 | CAPTCHAs | < 1 / 50 logins | Sin datos |
-| Fingerprint único por cuenta (amiunique.org) | ✓ | Pendiente 1.3 |
+| Fingerprint único por cuenta (amiunique.org) | ✓ | ⚠ Implementado — verificación manual pendiente |
 | IPs distintas verificadas | 5 móviles | Pendiente 1.1 |
 | Startup limpio en Ubuntu/Mac | ✓ | ✅ Completado 1.6 |
 

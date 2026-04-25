@@ -223,26 +223,21 @@ def update_account(name: str, email: str, groups: list[str]) -> bool:
 
 def rename_account(old_name: str, new_name: str, email: str, groups: list[str]) -> bool:
     """
-    Renombra una cuenta cambiando su PK. Copia timestamps, elimina la vieja.
+    Renombra una cuenta actualizando su PK en una sola transacción.
+    Usa UPDATE en lugar de INSERT+DELETE para preservar todos los campos
+    (incluyendo password_enc, fingerprint_json, ban_cooldown_until, etc.).
     Retorna True si old_name existía.
     """
     with _lock, _connect() as conn:
-        row = conn.execute(
-            "SELECT created_at, last_login_at, last_published_at FROM accounts WHERE name=? AND is_active=1",
-            (old_name,),
+        exists = conn.execute(
+            "SELECT 1 FROM accounts WHERE name=? AND is_active=1", (old_name,)
         ).fetchone()
-        if not row:
+        if not exists:
             return False
         conn.execute(
-            """INSERT INTO accounts (name, email, groups, created_at, last_login_at, last_published_at, is_active)
-               VALUES (?, ?, ?, ?, ?, ?, 1)
-               ON CONFLICT(name) DO UPDATE SET
-                   email=excluded.email, groups=excluded.groups, is_active=1""",
-            (new_name, email, json.dumps(groups), row["created_at"],
-             row["last_login_at"], row["last_published_at"]),
+            "UPDATE accounts SET name=?, email=?, groups=? WHERE name=?",
+            (new_name, email, json.dumps(groups), old_name),
         )
-        conn.execute("UPDATE accounts SET is_active=0 WHERE name=?", (old_name,))
-        # Actualizar historial de logins para que refleje el nuevo nombre
         conn.execute(
             "UPDATE login_events SET account_name=? WHERE account_name=?",
             (new_name, old_name),

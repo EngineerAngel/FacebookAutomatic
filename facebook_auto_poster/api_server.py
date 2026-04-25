@@ -38,7 +38,7 @@ from pathlib import Path
 from flask import (Flask, jsonify, redirect, render_template,
                    request, send_from_directory, session)
 
-from config import CONFIG, load_accounts, pick_fingerprint
+from config import CONFIG, load_accounts
 from account_manager import AccountManager
 import job_store
 import webhook
@@ -121,11 +121,20 @@ def health():
 # ---------------------------------------------------------------------------
 # Claves y configuración de seguridad
 # ---------------------------------------------------------------------------
-ADMIN_KEY       = os.getenv("ADMIN_KEY", "").strip()
+ADMIN_KEY        = os.getenv("ADMIN_KEY", "").strip()
 OPENCLAW_API_KEY = os.getenv("OPENCLAW_API_KEY", "").strip()
 
-# Firma las session cookies del panel admin
-app.secret_key = ADMIN_KEY if ADMIN_KEY else secrets.token_hex(32)
+# [FIX P0-1] SECRET_KEY dedicada para signing de sesiones — DISTINTA de ADMIN_KEY.
+# Si ADMIN_KEY == secret_key, un atacante con la cookie podría decodificar el payload
+# y forjar sesiones usando la misma clave. SESSION_SECRET resuelve esto.
+_SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip()
+app.secret_key = _SESSION_SECRET if _SESSION_SECRET else secrets.token_hex(32)
+if not _SESSION_SECRET:
+    logger.warning(
+        "[security] SESSION_SECRET no configurado — usando clave volátil. "
+        "Las sesiones admin se invalidarán en cada reinicio. "
+        "Añade SESSION_SECRET=<token-aleatorio-largo> a .env"
+    )
 
 logger = logging.getLogger("api_server")
 logger.setLevel(logging.INFO)
@@ -521,7 +530,9 @@ def create_schedule():
             "error": "Formato inválido para 'scheduled_for'. Usa ISO 8601, ej: 2026-04-18T15:30:00"
         }), 400
 
-    if when <= datetime.now():
+    from datetime import timezone as _tz
+    now_cmp = datetime.now(_tz.utc) if when.tzinfo else datetime.now()
+    if when <= now_cmp:
         return jsonify({"error": "'scheduled_for' debe ser en el futuro"}), 400
 
     _, err = _resolve_accounts(payload["accounts"])
@@ -588,6 +599,14 @@ def admin_login_page():
 
 @app.post("/admin/login")
 def admin_login():
+    # [FIX P1-4] Rate limiting en login — previene brute force contra ADMIN_KEY
+    ip = request.remote_addr or "unknown"
+    if job_store.is_rate_limited(ip, limit=_RATE_LIMIT, window=_RATE_WINDOW):
+        logger.warning("Rate limit en /admin/login para %s", ip)
+        if request.is_json:
+            return jsonify({"error": "Demasiados intentos, espera un momento"}), 429
+        return render_template("admin_login.html", error="Demasiados intentos, espera un momento"), 429
+
     data = request.get_json(silent=True) or {}
     key = (data.get("key") or request.form.get("key") or "").strip()
 
@@ -648,14 +667,8 @@ def admin_create_account():
     if err:
         return jsonify({"error": err}), 400
 
-    taken_ids = [
-        json.loads(r["fingerprint_json"])["id"]
-        for r in job_store.list_accounts_full()
-        if r.get("fingerprint_json")
-    ]
-    fp = pick_fingerprint(taken_ids)
-    job_store.create_account(name, email, groups, fingerprint_json=json.dumps(fp))
-    logger.info("Cuenta '%s' creada via admin | fp=%s", name, fp["id"])
+    job_store.create_account(name, email, groups)
+    logger.info("Cuenta '%s' creada via admin", name)
     return jsonify({"status": "created", "name": name}), 201
 
 
@@ -893,7 +906,10 @@ def admin_create_schedule():
             "error": "Formato inválido para 'scheduled_for'. Usa ISO 8601, ej: 2026-04-20T15:30:00"
         }), 400
 
-    if when <= datetime.now():
+    # [FIX P1-1] Comparar aware vs naive correctamente para evitar TypeError
+    from datetime import timezone as _tz
+    now_cmp = datetime.now(_tz.utc) if when.tzinfo else datetime.now()
+    if when <= now_cmp:
         return jsonify({"error": "'scheduled_for' debe ser en el futuro"}), 400
 
     _, err = _resolve_accounts(payload["accounts"])

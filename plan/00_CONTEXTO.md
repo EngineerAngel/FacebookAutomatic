@@ -78,8 +78,17 @@ Elevar el proyecto **Facebook Auto-Poster** a un estado donde:
 - [02_FASE_2.md](02_FASE_2.md) — Hardening
 - [03_FASE_3.md](03_FASE_3.md) — Refactor arquitectónico
 
+## Estado de fases (2026-04-24)
+
+| Fase | Estado | Notas |
+|------|--------|-------|
+| Fase 1 | ✅ 5/6 completos | 1.1 (proxies) pendiente — necesita hardware |
+| Fase 2 | ✅ 9/9 completos | Integrada en master. Pendiente pruebas formales. |
+| Fase 3 | ⏳ No iniciada | Prerrequisito: Fases 1+2 estables 2+ semanas |
+| Auditoría | ✅ Cerrada | 8/9 resueltos + 1 ya no aplica (función eliminada) |
+
 ## Fuentes de verdad
-- Código: `/home/angel/Proyectos/FacebookAutomatic/facebook_auto_poster/`
-- DB: `jobs.db` (SQLite)
+- Código: `c:\Users\ag464\Desktop\PublicWeb\facebook_auto_poster\`
+- DB: `facebook_auto_poster\jobs.db` (SQLite)
 - Config: `config.py` + `.env`
-- Logs: `logs/main.log` + `logs/{account}.log`
+- Logs: `facebook_auto_poster\logs\main.log` + `logs\{account}.log`

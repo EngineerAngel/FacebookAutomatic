@@ -167,8 +167,16 @@ def load_accounts() -> list[AccountConfig]:
                 )
             if accounts:
                 return accounts
-    except Exception:
-        pass  # BD no existe aún → fallback a .env
+    except (FileNotFoundError, ImportError):
+        pass  # BD genuinamente no existe aún — fallback a .env esperado
+    except Exception as _db_exc:
+        # [FIX P0-2] Error inesperado (corrupción, disco lleno, etc.)
+        # Logea visible antes de hacer fallback — no silencia problemas reales
+        import logging as _lg
+        _lg.getLogger(__name__).error(
+            "[config] Error inesperado leyendo DB — fallback a .env. "
+            "Verificar integridad de jobs.db. Error: %s", _db_exc
+        )
 
     # --- Fallback: leer desde .env ------------------------------------------
     return _load_accounts_from_env(global_password)

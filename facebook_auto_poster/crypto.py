@@ -60,13 +60,35 @@ def _load_or_create_key() -> bytes:
     return key
 
 
+import threading as _threading
+
+_fernet_lock = _threading.Lock()
+
+
 def _fernet() -> Fernet:
-    """Instancia Fernet con la clave maestra. Se cachea en módulo-level."""
+    """Instancia Fernet con la clave maestra. Thread-safe con double-checked locking."""
     if _fernet._instance is None:  # type: ignore[attr-defined]
-        _fernet._instance = Fernet(_load_or_create_key())
+        with _fernet_lock:
+            if _fernet._instance is None:  # [FIX P0-3] double-check tras adquirir lock
+                _fernet._instance = Fernet(_load_or_create_key())
     return _fernet._instance  # type: ignore[attr-defined]
 
 _fernet._instance = None  # type: ignore[attr-defined]
+
+
+# [FIX P1-3] Inicializar eagerly al cargar el módulo — fail-fast si .secret.key corrupta.
+# Sin esto, una clave inválida falla silenciosamente en runtime y el fallback
+# a FB_PASSWORD puede ocurrir sin ninguna advertencia visible.
+try:
+    _fernet()
+except Exception as _init_err:
+    logger.critical(
+        "[crypto] No se pudo inicializar Fernet al arrancar — .secret.key inválida o corrupta: %s\n"
+        "Opciones: (1) borrar .secret.key para generar una nueva clave, "
+        "(2) restaurar desde backup.",
+        _init_err,
+    )
+    raise  # No continuar con el sistema de cifrado roto
 
 
 # ---------------------------------------------------------------------------
