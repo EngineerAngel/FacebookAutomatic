@@ -536,6 +536,40 @@ def mark_running_as_interrupted() -> int:
 
 
 # ---------------------------------------------------------------------------
+# Métricas para healthcheck
+# ---------------------------------------------------------------------------
+def count_pending_jobs() -> int:
+    """Número de jobs en cola (pending o running)."""
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE status IN ('pending','running')"
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+
+def count_active_accounts() -> int:
+    """Cuentas activas que NO están en cooldown de ban."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM accounts
+               WHERE is_active=1
+                 AND (ban_cooldown_until IS NULL OR ban_cooldown_until <= ?)""",
+            (now,),
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+
+def count_jobs_by_status() -> dict[str, int]:
+    """Distribución de jobs por estado (para healthcheck detallado)."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status"
+        ).fetchall()
+        return {r["status"]: int(r["n"]) for r in rows}
+
+
+# ---------------------------------------------------------------------------
 # Consultas para scheduler_runner
 # ---------------------------------------------------------------------------
 def pop_due_scheduled(now: datetime) -> list[dict]:

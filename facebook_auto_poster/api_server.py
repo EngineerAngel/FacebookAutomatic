@@ -44,6 +44,9 @@ import webhook
 
 app = Flask(__name__)
 
+# Timestamp del arranque para reportar uptime en /health
+_START_TIME = time.time()
+
 
 @app.get("/")
 def root():
@@ -56,6 +59,32 @@ def service_worker():
 @app.get("/manifest.json")
 def manifest():
     return send_from_directory("static", "manifest.json", mimetype="application/manifest+json")
+
+
+# ---------------------------------------------------------------------------
+# Healthcheck — público, sin info sensible
+# ---------------------------------------------------------------------------
+@app.get("/health")
+def health():
+    """Liveness/readiness probe para OpenClaw y monitoreo externo."""
+    try:
+        with job_store._connect() as conn:
+            conn.execute("SELECT 1").fetchone()
+        db_ok = True
+    except Exception:
+        db_ok = False
+
+    active_accounts = job_store.count_active_accounts() if db_ok else 0
+    pending = job_store.count_pending_jobs() if db_ok else -1
+
+    status = "ok" if (db_ok and active_accounts > 0) else "degraded"
+    return jsonify({
+        "status": status,
+        "db": db_ok,
+        "active_accounts": active_accounts,
+        "pending_jobs": pending,
+        "uptime_s": int(time.time() - _START_TIME),
+    }), (200 if status == "ok" else 503)
 
 # ---------------------------------------------------------------------------
 # Claves y configuración de seguridad
@@ -297,6 +326,31 @@ def _run_job(job_id: str, accounts, text: str,
 # ===========================================================================
 # ENDPOINTS OPENCLAW (todos protegidos con X-API-Key)
 # ===========================================================================
+
+@app.get("/health/detailed")
+@openclaw_required
+def health_detailed():
+    """Healthcheck completo — requiere X-API-Key."""
+    try:
+        with job_store._connect() as conn:
+            conn.execute("SELECT 1").fetchone()
+        db_ok = True
+    except Exception:
+        db_ok = False
+
+    if not db_ok:
+        return jsonify({"status": "degraded", "db": False}), 503
+
+    return jsonify({
+        "status": "ok",
+        "db": True,
+        "uptime_s": int(time.time() - _START_TIME),
+        "active_accounts": job_store.count_active_accounts(),
+        "banned_accounts": len(job_store.list_active_bans()),
+        "jobs_by_status": job_store.count_jobs_by_status(),
+        "recent_bans": job_store.list_recent_bans(limit=10),
+    })
+
 
 @app.get("/accounts")
 @openclaw_required
