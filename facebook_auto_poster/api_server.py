@@ -29,7 +29,6 @@ import secrets
 import threading
 import time
 import uuid
-from collections import defaultdict
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -110,24 +109,10 @@ UPLOAD_DIR = Path(__file__).resolve().parent / "uploaded_images"
 _ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 # ---------------------------------------------------------------------------
-# Rate limiter simple en memoria (por IP, ventana deslizante)
+# Rate limiter — persistente en SQLite (sobrevive a reinicios)
 # ---------------------------------------------------------------------------
-_rate_data: defaultdict[str, list[float]] = defaultdict(list)
-_rate_lock = threading.Lock()
-_RATE_LIMIT   = 10   # máx requests
-_RATE_WINDOW  = 60   # por ventana de N segundos
-
-
-def _is_rate_limited(ip: str) -> bool:
-    now = time.monotonic()
-    with _rate_lock:
-        hits = _rate_data[ip]
-        # Eliminar hits fuera de la ventana
-        _rate_data[ip] = [t for t in hits if now - t < _RATE_WINDOW]
-        if len(_rate_data[ip]) >= _RATE_LIMIT:
-            return True
-        _rate_data[ip].append(now)
-        return False
+_RATE_LIMIT  = 10   # máx requests por ventana
+_RATE_WINDOW = 60   # ventana en segundos
 
 
 # ---------------------------------------------------------------------------
@@ -147,8 +132,9 @@ def openclaw_required(f):
             return jsonify({"error": "API key inválida o ausente"}), 401
 
         ip = request.remote_addr or "unknown"
-        if _is_rate_limited(ip):
-            logger.warning("Rate limit alcanzado para %s", ip)
+        endpoint = request.endpoint or request.path
+        if job_store.is_rate_limited(ip, endpoint, _RATE_LIMIT, _RATE_WINDOW):
+            logger.warning("Rate limit alcanzado para %s en %s", ip, endpoint)
             return jsonify({"error": "Demasiadas peticiones, espera un momento"}), 429
 
         return f(*args, **kwargs)

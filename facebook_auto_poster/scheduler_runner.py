@@ -30,6 +30,10 @@ logger.addHandler(_ch)
 # Señal de parada para graceful shutdown
 _stop_event = threading.Event()
 
+# Purga diaria de eventos de rate limit viejos (retención 7 días)
+_PURGE_INTERVAL_S = 24 * 3600
+_last_purge_ts: float = 0.0
+
 
 def _run_scheduled_job(job: dict) -> None:
     """Ejecuta un job agendado: mismo pipeline que POST /post."""
@@ -76,6 +80,21 @@ def _run_scheduled_job(job: dict) -> None:
                      error_msg="Unhandled exception")
 
 
+def _maybe_purge_rate_limits() -> None:
+    """Purga eventos de rate limit viejos una vez al día."""
+    global _last_purge_ts
+    now = time.time()
+    if now - _last_purge_ts < _PURGE_INTERVAL_S:
+        return
+    try:
+        deleted = job_store.purge_old_rate_limit_events(days=7)
+        if deleted:
+            logger.info("Purge rate_limit_events: %d filas eliminadas", deleted)
+    except Exception:
+        logger.exception("Error en purge de rate_limit_events")
+    _last_purge_ts = now
+
+
 def _loop() -> None:
     logger.info("Scheduler loop arrancando (poll=%ds)", POLL_SECONDS)
     while not _stop_event.is_set():
@@ -88,6 +107,7 @@ def _loop() -> None:
                     daemon=True,
                     name=f"scheduled-{job['id']}",
                 ).start()
+            _maybe_purge_rate_limits()
         except Exception:
             logger.exception("Error en el loop del scheduler")
         # Espera interrumpible — permite stop() inmediato

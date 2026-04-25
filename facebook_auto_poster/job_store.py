@@ -14,6 +14,7 @@ Base de datos: jobs.db (local, gitignored, nunca expuesto por API)
 import json
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -104,6 +105,13 @@ def init_db() -> None:
                 reviewed        INTEGER NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS rate_limit_events (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip       TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                ts       REAL NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_jobs_scheduled ON jobs(scheduled_for)
                 WHERE type = 'scheduled';
@@ -112,6 +120,8 @@ def init_db() -> None:
                 ON gemini_usage(account_name, used_at);
             CREATE INDEX IF NOT EXISTS idx_account_bans_account
                 ON account_bans(account_name, detected_at);
+            CREATE INDEX IF NOT EXISTS idx_ratelimit_lookup
+                ON rate_limit_events(ip, endpoint, ts);
         """)
 
         # Migraciones seguras — no fallan si la columna ya existe
@@ -567,6 +577,49 @@ def count_jobs_by_status() -> dict[str, int]:
             "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status"
         ).fetchall()
         return {r["status"]: int(r["n"]) for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter persistente (SQLite)
+# ---------------------------------------------------------------------------
+def is_rate_limited(ip: str, endpoint: str, limit: int, window_s: int) -> bool:
+    """Retorna True si ip+endpoint excedió `limit` hits en los últimos window_s.
+
+    Registra el hit actual si no está limitado, en operación atómica bajo _lock.
+    Sobrevive a reinicios del servidor — los hits viejos se purgan en la misma
+    llamada.
+    """
+    now = time.time()
+    cutoff = now - window_s
+    with _lock, _connect() as conn:
+        # Purgar eventos viejos para este (ip, endpoint)
+        conn.execute(
+            "DELETE FROM rate_limit_events WHERE ip=? AND endpoint=? AND ts < ?",
+            (ip, endpoint, cutoff),
+        )
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM rate_limit_events WHERE ip=? AND endpoint=? AND ts >= ?",
+            (ip, endpoint, cutoff),
+        ).fetchone()
+        count = int(row["n"]) if row else 0
+        if count >= limit:
+            return True
+        conn.execute(
+            "INSERT INTO rate_limit_events (ip, endpoint, ts) VALUES (?, ?, ?)",
+            (ip, endpoint, now),
+        )
+        return False
+
+
+def purge_old_rate_limit_events(days: int = 7) -> int:
+    """Elimina eventos más viejos que N días. Retorna filas eliminadas."""
+    cutoff = time.time() - days * 86400
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM rate_limit_events WHERE ts < ?",
+            (cutoff,),
+        )
+        return int(cur.rowcount)
 
 
 # ---------------------------------------------------------------------------
