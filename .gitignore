@@ -47,3 +47,8 @@ jobs.db-shm
 *.tmp
 *.temp
 *.bak
+
+# Binary executables
+*.exe
+cloudflared.exe
+chromedriver.exe
