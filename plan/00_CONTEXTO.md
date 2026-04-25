@@ -6,7 +6,7 @@ Elevar el proyecto **Facebook Auto-Poster** a un estado donde:
 2. **Rendimiento y estabilidad** soporten operación 24/7 con múltiples cuentas sin intervención manual.
 3. **Mantenibilidad** permita evolucionar rápido cuando Facebook cambie su DOM o sus heurísticas de detección.
 
-## Estado actual (auditoría al 2026-04-23)
+## Estado actual (auditoría al 2026-04-23, actualizado al 2026-04-25)
 
 ### Stack existente
 | Capa | Tecnología | Estado |
@@ -76,15 +76,17 @@ Elevar el proyecto **Facebook Auto-Poster** a un estado donde:
 
 - [01_FASE_1.md](01_FASE_1.md) — Crítica (stop-the-bleeding)
 - [02_FASE_2.md](02_FASE_2.md) — Hardening
-- [04_PROPUESTA_FASE_2_10.md](04_PROPUESTA_FASE_2_10.md) — **PROPUESTA:** Auto-descubrimiento de grupos (pendiente aprobación)
+- [04_PROPUESTA_FASE_2_10.md](04_PROPUESTA_FASE_2_10.md) — ✅ **COMPLETADO:** Auto-descubrimiento de grupos
 - [03_FASE_3.md](03_FASE_3.md) — Refactor arquitectónico
+- [grupos.md](grupos.md) — Especificación: Script seguro para extracción de grupos (DOM scraping)
 
-## Estado de fases (2026-04-24)
+## Estado de fases (2026-04-25)
 
 | Fase | Estado | Notas |
 |------|--------|-------|
 | Fase 1 | ✅ 5/6 completos | 1.1 (proxies) pendiente — necesita hardware |
 | Fase 2 | ✅ 9/9 completos | Integrada en master. Pendiente pruebas formales. |
+| **Fase 2.10** | ✅ **COMPLETADO** | Auto-descubrimiento con trigger manual + notificaciones en admin. Pendiente E2E testing. |
 | Fase 3 | ⏳ No iniciada | Prerrequisito: Fases 1+2 estables 2+ semanas |
 | Auditoría | ✅ Cerrada | 8/9 resueltos + 1 ya no aplica (función eliminada) |
 
