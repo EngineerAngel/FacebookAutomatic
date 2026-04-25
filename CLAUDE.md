@@ -88,6 +88,15 @@ El campo `email` en la BD almacena **indistintamente** email o teléfono. Facebo
 
 Cookies se asocian por identificador (se buscan en `account_cookies.email` usando cualquiera de los dos formatos).
 
+### Grupos (Grupos de Publicación) — Opcional
+
+Los IDs de grupos de Facebook son **opcionales** al crear/editar una cuenta:
+- Una cuenta sin grupos **no publicará** (se salta silenciosamente al cargar cuentas)
+- **Panel admin**: badge naranja `⚠ Sin grupos` para identificarlas visualmente
+- **Logs**: `WARNING [config] Cuenta 'X' omitida — no tiene grupos configurados` cuando se cargan cuentas sin grupos
+- **Agregar después**: editar la cuenta en `/admin` y completar el campo "IDs de grupos"
+- **`.env` fallback**: `{PREFIX}_GROUPS` es opcional (puede dejarse vacío)
+
 ## Authentication & Security
 
 | Layer | Method |

@@ -233,11 +233,10 @@ def _validate_account_input(name: str, email: str, groups: list) -> str | None:
     err = _validate_login_id(email)
     if err:
         return err
-    if not isinstance(groups, list) or not groups:
-        return "Debes proporcionar al menos un grupo"
-    for g in groups:
-        if not str(g).strip().isdigit():
-            return f"ID de grupo inválido: '{g}' — solo se aceptan números"
+    if groups and isinstance(groups, list):
+        for g in groups:
+            if not str(g).strip().isdigit():
+                return f"ID de grupo inválido: '{g}' — solo se aceptan números"
     return None
 
 
@@ -674,6 +673,8 @@ def admin_list_accounts():
     # solo indicar si la cuenta tiene una contraseña distinta a la principal.
     for r in rows:
         r["has_custom_password"] = bool(r.pop("password_enc", None))
+        groups_list = json.loads(r.get("groups") or "[]")
+        r["has_groups"] = len(groups_list) > 0
     return jsonify(rows)
 
 

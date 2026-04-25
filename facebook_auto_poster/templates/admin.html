@@ -82,6 +82,7 @@ tr:hover td { background: #151823; }
   display: inline-block; background: #1e293b; color: #94a3b8;
   border-radius: 4px; padding: 0.15rem 0.5rem; font-size: 0.75rem;
 }
+.badge-warn { background: #7c2d12; color: #fed7aa; }
 .ok  { background: #14532d; color: #86efac; }
 .fail { background: #3b1219; color: #fca5a5; }
 
@@ -320,9 +321,9 @@ tr:hover td { background: #151823; }
       </div>
     </div>
     <div class="field">
-      <label>IDs de grupos</label>
+      <label>IDs de grupos <small>(opcional)</small></label>
       <input type="text" id="f-groups" placeholder="111111111111, 222222222222, 333333333333">
-      <p class="hint">Separados por coma. Son los IDs numéricos de los grupos de Facebook.</p>
+      <p class="hint">Separados por coma. Son los IDs numéricos de los grupos de Facebook. Déjalo vacío para agregar después.</p>
     </div>
     <div class="modal-actions">
       <button class="btn btn-cancel" onclick="closeModal()">Cancelar</button>
@@ -411,9 +412,15 @@ async function loadAccounts() {
 
     const tdGroups = document.createElement('td');
     const badge = document.createElement('span');
-    badge.className = 'badge';
-    badge.textContent = groups.length + ' grupo' + (groups.length !== 1 ? 's' : '');
-    badge.title = groups.join(', ');
+    if (groups.length === 0) {
+      badge.className = 'badge badge-warn';
+      badge.textContent = '⚠ Sin grupos';
+      badge.title = 'Esta cuenta no publicará hasta que agregues grupos';
+    } else {
+      badge.className = 'badge';
+      badge.textContent = groups.length + ' grupo' + (groups.length !== 1 ? 's' : '');
+      badge.title = groups.join(', ');
+    }
     tdGroups.appendChild(badge);
 
     const tdLogin = document.createElement('td');
@@ -506,7 +513,11 @@ async function saveAccount() {
   // Guardar contraseña si corresponde
   await setAccountPassword(savedName, pwMode, pwVal);
 
-  toast(isEdit ? 'Cuenta actualizada' : 'Cuenta creada');
+  if (!groups.length) {
+    toast('Cuenta guardada. Nota: no tiene grupos configurados — agrégalos para que pueda publicar.');
+  } else {
+    toast(isEdit ? 'Cuenta actualizada' : 'Cuenta creada');
+  }
   closeModal();
   loadAccounts();
 }

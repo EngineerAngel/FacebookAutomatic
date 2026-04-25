@@ -165,6 +165,10 @@ def load_accounts() -> list[AccountConfig]:
             for r in rows:
                 groups = json.loads(r["groups"]) if r.get("groups") else []
                 if not groups:
+                    import logging as _lg
+                    _lg.getLogger(__name__).warning(
+                        "[config] Cuenta '%s' omitida — no tiene grupos configurados", r["name"]
+                    )
                     continue
                 cooldown = r.get("ban_cooldown_until")
                 if cooldown and cooldown > now_iso:
@@ -245,19 +249,14 @@ def _load_accounts_from_env(global_password: str) -> list[AccountConfig]:
         )
         groups_raw = os.getenv(f"{prefix}_GROUPS", "").strip()
 
-        missing: list[str] = []
+        # Email/phone es obligatorio; grupos es opcional (puede agregarse después en el admin)
         if not email:
-            missing.append(f"{prefix}_EMAIL (o {prefix}_PHONE)")
-        if not groups_raw:
-            missing.append(f"{prefix}_GROUPS")
-
-        if missing:
             raise ValueError(
-                f"Missing .env keys for account '{name}': {', '.join(missing)}. "
+                f"Missing .env key for account '{name}': {prefix}_EMAIL (o {prefix}_PHONE). "
                 f"Check your .env file."
             )
 
-        groups = [g.strip() for g in groups_raw.split(",") if g.strip()]
+        groups = [g.strip() for g in groups_raw.split(",") if g.strip()] if groups_raw else []
 
         accounts.append(
             AccountConfig(
