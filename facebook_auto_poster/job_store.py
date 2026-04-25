@@ -520,6 +520,21 @@ def cancel_job(job_id: str) -> bool:
         return cursor.rowcount > 0
 
 
+def mark_running_as_interrupted() -> int:
+    """Marca todos los jobs en estado 'running' como 'interrupted'.
+
+    Usado en el arranque del servidor (crash/shutdown previo dejó jobs huérfanos)
+    y durante graceful shutdown. Retorna el número de filas afectadas.
+    """
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "UPDATE jobs SET status='interrupted', finished_at=? WHERE status='running'",
+            (now,),
+        )
+        return int(cur.rowcount)
+
+
 # ---------------------------------------------------------------------------
 # Consultas para scheduler_runner
 # ---------------------------------------------------------------------------
