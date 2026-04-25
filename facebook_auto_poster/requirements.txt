@@ -1,7 +1,22 @@
-patchright>=1.58.0
-emunium>=3.0.0
-python-dotenv>=1.0.0
-flask>=3.0.0
-requests>=2.31.0
-google-genai>=0.3.0
-cryptography>=42.0.0
+# Dependencies — pinned with ~= (compatible release, allows patch/minor updates
+# but prevents major version breaking changes).
+#
+# Regenerar snapshot exacto con:  pip freeze > requirements.lock.txt
+#
+# Browser automation
+patchright~=1.58
+emunium~=3.0
+
+# API + serving
+flask~=3.0
+waitress~=3.0
+
+# Config / networking
+python-dotenv~=1.0
+requests~=2.31
+
+# Google Gemini SDK
+google-genai~=0.3
+
+# Cifrado de contrasenias individuales (Fernet / AES-128-CBC + HMAC)
+cryptography~=42.0

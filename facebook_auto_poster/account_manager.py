@@ -28,9 +28,10 @@ def _worker(
     text: str,
     shared_results: dict,
     image_path: str | None = None,
+    callback_url: str | None = None,
 ) -> None:
     """Run a full session for one account inside a child process."""
-    poster = FacebookPoster(account, config)
+    poster = FacebookPoster(account, config, callback_url=callback_url)
     try:
         if not poster.login():
             logger.error("Login failed for %s — skipping", account.name)
@@ -60,11 +61,13 @@ class AccountManager:
         config: dict,
         text: str,
         image_path: str | None = None,
+        callback_url: str | None = None,
     ) -> None:
         self.accounts = accounts
         self.config = config
         self.text = text
         self.image_path = image_path
+        self.callback_url = callback_url
 
     # ------------------------------------------------------------------ #
     # Sequential execution
@@ -74,7 +77,7 @@ class AccountManager:
 
         for idx, account in enumerate(self.accounts):
             logger.info("Starting session for %s", account.name)
-            poster = FacebookPoster(account, self.config)
+            poster = FacebookPoster(account, self.config, callback_url=self.callback_url)
 
             try:
                 if not poster.login():
@@ -115,7 +118,8 @@ class AccountManager:
         for account in self.accounts:
             p = multiprocessing.Process(
                 target=_worker,
-                args=(account, self.config, self.text, shared_results, self.image_path),
+                args=(account, self.config, self.text, shared_results,
+                      self.image_path, self.callback_url),
                 name=f"poster-{account.name}",
             )
             processes.append(p)

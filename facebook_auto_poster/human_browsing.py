@@ -16,9 +16,17 @@ from __future__ import annotations
 
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import TYPE_CHECKING, Optional
 
 import requests
+
+
+# Pool compartido para descargas de imágenes (no bloquea el thread del browser
+# por más de _IMG_FUTURE_TIMEOUT_S)
+_IMG_HTTP_TIMEOUT_S = 3.0      # timeout dentro de requests.get
+_IMG_FUTURE_TIMEOUT_S = 3.5    # límite duro desde el caller
+_img_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="img-dl")
 
 if TYPE_CHECKING:
     from facebook_poster import FacebookPoster
@@ -300,7 +308,12 @@ class HumanBrowsing:
         return ""
 
     def _extract_image_bytes(self, article):
-        """Devuelve (bytes, mime) de la primera imagen del post, o (None, '')."""
+        """Devuelve (bytes, mime) de la primera imagen del post, o (None, '').
+
+        La descarga HTTP se ejecuta en un ThreadPoolExecutor con timeout duro
+        para que un CDN lento no bloquee al browser (señal de inactividad que
+        Facebook podría detectar como automatización).
+        """
         for xp in _POST_IMG_XPATHS:
             try:
                 img = article.locator(f"xpath={xp}").first
@@ -309,7 +322,17 @@ class HumanBrowsing:
                 src = img.get_attribute("src", timeout=2000) or ""
                 if not src.startswith("http"):
                     continue
-                resp = requests.get(src, timeout=8)
+                future = _img_executor.submit(
+                    requests.get, src, timeout=_IMG_HTTP_TIMEOUT_S
+                )
+                try:
+                    resp = future.result(timeout=_IMG_FUTURE_TIMEOUT_S)
+                except FutureTimeout:
+                    self.logger.debug(
+                        "[Gemini] Imagen no descargó en %.1fs — skip",
+                        _IMG_FUTURE_TIMEOUT_S,
+                    )
+                    continue
                 if resp.status_code != 200:
                     continue
                 mime = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()

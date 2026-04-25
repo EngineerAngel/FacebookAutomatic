@@ -20,7 +20,6 @@ import time
 from pathlib import Path
 
 from patchright.sync_api import (
-    Browser,
     BrowserContext,
     Page,
     TimeoutError as PatchrightTimeout,
@@ -36,8 +35,10 @@ except ImportError:
 
 from config import AccountConfig
 import job_store
+import webhook
 from gemini_commenter import GeminiCommenter
 from human_browsing import HumanBrowsing
+from text_variation import TextVariator
 
 # ---------------------------------------------------------------------------
 # Text-variation helpers
@@ -72,6 +73,16 @@ def _vary_text(text: str, account_name: str) -> str:
 # (title bar + tab strip + address bar). Ajustable si hace falta.
 _CHROME_UI_Y_OFFSET = 85
 
+# ---------------------------------------------------------------------------
+# Detección de bans — mitigación de falsos positivos
+# ---------------------------------------------------------------------------
+# Ventana en segundos para agrupar detecciones. 2 detecciones dentro de esta
+# ventana activan el cooldown; una aislada solo se loguea (puede ser popup
+# temporal de Facebook confundido con ban).
+_BAN_WINDOW_S = 600  # 10 min
+# Duración del cooldown tras confirmación de ban.
+_BAN_COOLDOWN_HOURS = 48
+
 
 # ---------------------------------------------------------------------------
 # FacebookPoster
@@ -81,9 +92,15 @@ class FacebookPoster:
 
     _TYPO_ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
-    def __init__(self, account: AccountConfig, config: dict) -> None:
+    def __init__(
+        self,
+        account: AccountConfig,
+        config: dict,
+        callback_url: str | None = None,
+    ) -> None:
         self.account = account
         self.config = config
+        self._callback_url = callback_url
 
         # -- per-account logger ------------------------------------------
         self.logger = logging.getLogger(f"poster.{account.name}")
@@ -110,6 +127,9 @@ class FacebookPoster:
         # -- Runtime flags (per-account scope) ---------------------------
         self._banned: bool = False
         self._publish_count: int = 0
+        # Timestamps de detecciones recientes para mitigar falsos positivos
+        # (requiere 2 detecciones dentro de _BAN_WINDOW_S para activar cooldown)
+        self._ban_detection_times: list[float] = []
 
         # -- Window offsets for Emunium screen-coord translation ---------
         pos_x, pos_y = config.get("browser_window_position", (0, 0))
@@ -117,8 +137,12 @@ class FacebookPoster:
         self._window_y_offset = pos_y + _CHROME_UI_Y_OFFSET
 
         # -- Playwright lifecycle ----------------------------------------
+        # launch_persistent_context no expone Browser separado; self.browser
+        # se conserva como None por retrocompatibilidad con código legacy
+        # que solo lo usaba en close().
+        self.browser = None
         self._pw = sync_playwright().start()
-        self.browser, self.context, self.page = self._build_browser()
+        self.context, self.page = self._build_browser()
 
         # -- Emunium (standalone, opera en coords OS) --------------------
         self._em = None
@@ -145,6 +169,26 @@ class FacebookPoster:
                 logger=self.logger,
             )
 
+        # -- Text variator (Gemini paraphrase, Fase 2.2) -----------------
+        self._text_variator: TextVariator | None = None
+        if config.get("text_variation_mode", "off") == "gemini":
+            api_keys = config.get("gemini_api_keys", [])
+            if isinstance(api_keys, str):
+                api_keys = [api_keys]
+            _gemini_for_variation = self._gemini or (
+                GeminiCommenter(
+                    api_keys=api_keys,
+                    model=config.get("gemini_model", "gemini-2.5-flash"),
+                    timeout=config.get("gemini_timeout", 15),
+                    lang=config.get("gemini_comment_lang", "es-MX"),
+                    logger=self.logger,
+                ) if api_keys else None
+            )
+            self._text_variator = TextVariator(
+                gemini=_gemini_for_variation,
+                logger=self.logger,
+            )
+
         # -- Human browsing (warmup antes de publicar) -------------------
         self._browsing: HumanBrowsing | None = None
         if config.get("human_browsing_enabled", False):
@@ -157,57 +201,109 @@ class FacebookPoster:
     # ------------------------------------------------------------------ #
     # Browser setup
     # ------------------------------------------------------------------ #
-    def _build_browser(self) -> tuple[Browser, BrowserContext, Page]:
-        fp = self.account.fingerprint
-        w, h = fp.get("viewport", [1280, 720])
+    def _resolve_user_data_dir(self) -> Path:
+        """Resuelve el user_data_dir para esta cuenta. Maneja profiles corruptos.
+
+        Si existe un .lock file (dejado por un Chrome crasheado), renombra el
+        profile a <name>.corrupt.<ts> y crea uno nuevo. Esto previene que un
+        crash previo bloquee arranques futuros.
+        """
+        base = Path(__file__).resolve().parent / "browser_profiles"
+        base.mkdir(parents=True, exist_ok=True)
+        profile_dir = base / self.account.name
+        lock_file = profile_dir / ".lock"
+
+        if lock_file.exists():
+            corrupt_name = f"{self.account.name}.corrupt.{int(time.time())}"
+            corrupt_dir = base / corrupt_name
+            self.logger.warning(
+                "[Driver] Profile %s tiene .lock stale — renombrando a %s",
+                self.account.name, corrupt_name,
+            )
+            try:
+                profile_dir.rename(corrupt_dir)
+            except Exception:
+                self.logger.exception("[Driver] Error renombrando profile corrupto")
+
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        # Escribir lock file; se limpia en close()
+        try:
+            lock_file.touch(exist_ok=True)
+        except Exception:
+            pass
+        return profile_dir
+
+    def _migrate_cookies_if_needed(self, context: "BrowserContext", profile_dir: Path) -> None:
+        """Inyecta cookies de account_cookies en el context la primera vez.
+
+        Cuando el profile es nuevo (sin cookies), migra desde la tabla legacy
+        una sola vez. A partir de ahí el profile persiste cookies localmente.
+        """
+        marker = profile_dir / ".cookies_migrated"
+        if marker.exists():
+            return
+        try:
+            cookies = job_store.load_cookies(self.account.email)
+            if cookies:
+                context.add_cookies(cookies)
+                self.logger.info(
+                    "[Driver] Migradas %d cookies desde DB al profile persistente",
+                    len(cookies),
+                )
+            marker.touch()
+        except Exception:
+            self.logger.warning("[Driver] Falló migración de cookies", exc_info=True)
+
+    def _build_browser(self) -> tuple[BrowserContext, Page]:
+        self.logger.info("[Driver] Construyendo browser Patchright para %s ...", self.account.name)
+
+        w, h = self.config["browser_window_size"]
         pos_x, pos_y = self.config.get("browser_window_position", (0, 0))
         headless = bool(self.config["browser_headless"])
-
-        self.logger.info("[Driver] Construyendo browser | cuenta=%s fp=%s",
-                         self.account.name, fp.get("id", "?"))
 
         args = [
             f"--window-position={pos_x},{pos_y}",
             f"--window-size={w},{h}",
             "--disable-notifications",
-            f"--lang={fp.get('locale', 'es-MX').split('-')[0]}",
+            "--lang=es",
+            "--disable-blink-features=AutomationControlled",
         ]
 
         if headless:
             self.logger.info("[Driver] Modo headless activado")
 
+        # Fingerprint genérico — Fase 1.3 lo reemplazará por per-account.
+        user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/132.0.0.0 Safari/537.36"
+        )
+
+        user_data_dir = self._resolve_user_data_dir()
+
         try:
-            browser = self._pw.chromium.launch(headless=headless, args=args)
+            context = self._pw.chromium.launch_persistent_context(
+                user_data_dir=str(user_data_dir),
+                headless=headless,
+                args=args,
+                user_agent=user_agent,
+                viewport={"width": w, "height": h},
+                locale="es-MX",
+                timezone_id=self.account.timezone,
+                color_scheme="light",
+            )
         except Exception:
             self.logger.error("[Driver] FALLO al lanzar Chromium parcheado", exc_info=True)
             raise
 
-        context = browser.new_context(
-            user_agent=fp.get("user_agent"),
-            viewport={"width": w, "height": h},
-            locale=fp.get("locale", "es-MX"),
-            timezone_id=fp.get("timezone", "America/Mexico_City"),
-            color_scheme=fp.get("color_scheme", "light"),
-            extra_http_headers={
-                "sec-ch-ua": fp.get("sec_ch_ua", ""),
-                "sec-ch-ua-platform": fp.get("sec_ch_ua_platform", '"Windows"'),
-                "sec-ch-ua-mobile": "?0",
-            },
-        )
+        # Timeout por defecto (ms) para operaciones que no lo especifiquen
         context.set_default_timeout(self.config.get("implicit_wait", 10) * 1000)
 
-        hw = fp.get("hardware_concurrency", 8)
-        dm = fp.get("device_memory", 8)
-        platform = fp.get("platform", "Win32")
-        context.add_init_script(f"""
-            Object.defineProperty(navigator, 'hardwareConcurrency', {{get: () => {hw}}});
-            Object.defineProperty(navigator, 'deviceMemory', {{get: () => {dm}}});
-            Object.defineProperty(navigator, 'platform', {{get: () => '{platform}'}});
-        """)
+        self._migrate_cookies_if_needed(context, user_data_dir)
 
-        page = context.new_page()
-        self.logger.info("[Driver] Patchright listo | ua=%s...", fp.get("user_agent", "")[:50])
-        return browser, context, page
+        page = context.pages[0] if context.pages else context.new_page()
+        self.logger.info("[Driver] Patchright listo. URL inicial: %s", page.url or "(blank)")
+        return context, page
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -606,14 +702,61 @@ class FacebookPoster:
         return "clear"
 
     def _handle_banned(self, context: str) -> None:
-        """Registra y toma screenshot cuando se detecta un soft-ban."""
+        """Registra soft-ban, toma screenshot y activa cooldown tras 2 detecciones.
+
+        Una detección aislada puede ser un popup temporal de Facebook. Solo
+        cuando hay 2 detecciones dentro de _BAN_WINDOW_S se considera ban
+        confirmado y se persiste + activa cooldown.
+        """
         self.logger.critical(
             "[BANNED] Soft-ban detectado en %s para cuenta %s — URL: %s",
             context, self.account.name, self.page.url,
         )
         print(f"\n[!] SOFT-BAN detectado en cuenta {self.account.name} "
               f"({context}) — abortando retries.\n")
-        self._screenshot(f"banned_{self.account.name}.png")
+
+        screenshot_name = f"banned_{self.account.name}_{int(time.time())}.png"
+        self._screenshot(screenshot_name)
+        screenshot_path = os.path.join(self.account.screenshots_dir, screenshot_name)
+
+        # Purgar detecciones viejas y agregar la actual
+        now = time.time()
+        self._ban_detection_times = [
+            t for t in self._ban_detection_times if now - t < _BAN_WINDOW_S
+        ]
+        self._ban_detection_times.append(now)
+
+        if len(self._ban_detection_times) < 2:
+            self.logger.warning(
+                "[BANNED] Primera detección en ventana de %ds — esperando confirmación "
+                "(posible falso positivo)", _BAN_WINDOW_S,
+            )
+            return
+
+        # Segunda detección en la ventana → confirmado
+        self.logger.critical(
+            "[BANNED] CONFIRMADO (%d detecciones en %ds) — activando cooldown %dh",
+            len(self._ban_detection_times), _BAN_WINDOW_S, _BAN_COOLDOWN_HOURS,
+        )
+        try:
+            job_store.record_ban(
+                account_name=self.account.name,
+                context=context,
+                screenshot_path=screenshot_path,
+            )
+            job_store.set_account_ban_cooldown(
+                self.account.name, hours=_BAN_COOLDOWN_HOURS,
+            )
+        except Exception:
+            self.logger.error("[BANNED] Error persistiendo ban en DB", exc_info=True)
+
+        # Notificar a OpenClaw (fire-and-forget, no bloquea)
+        webhook.fire_account_banned(
+            url=self._callback_url,
+            account_name=self.account.name,
+            context=context,
+            cooldown_hours=_BAN_COOLDOWN_HOURS,
+        )
 
     def _wait_for_manual_resolution(self) -> bool:
         """Pausa hasta que el operador resuelva el CAPTCHA/checkpoint manualmente.
@@ -1072,10 +1215,7 @@ class FacebookPoster:
         Returns a dict mapping group_id -> success boolean.
         """
         results: dict[str, bool] = {}
-
-        if self.config.get("text_variation_mode", False):
-            text = _vary_text(text, self.account.name)
-            self.logger.debug("Text variation applied for %s", self.account.name)
+        variation_mode = self.config.get("text_variation_mode", "off")
 
         groups = self.account.groups[: self.config["max_groups_per_session"]]
 
@@ -1099,7 +1239,19 @@ class FacebookPoster:
                     results[remaining] = False
                 break
 
-            success = self.publish(group_id, text, image_path=image_path)
+            # Variación de texto por (cuenta, grupo) — diferente para cada destino
+            group_text = text
+            if variation_mode == "gemini" and self._text_variator:
+                group_text = self._text_variator.variate(text, self.account.name, group_id)
+            elif variation_mode == "zero_width":
+                group_text = _vary_text(text, self.account.name)
+
+            self.logger.debug(
+                "[Variation] mode=%s account=%s group=%s orig=%d final=%d chars",
+                variation_mode, self.account.name, group_id, len(text), len(group_text),
+            )
+
+            success = self.publish(group_id, group_text, image_path=image_path)
             results[group_id] = success
 
             # Wait between groups, but not after the last one
@@ -1124,13 +1276,21 @@ class FacebookPoster:
         except Exception:
             self.logger.debug("Error cerrando context", exc_info=True)
         try:
-            self.browser.close()
-        except Exception:
-            self.logger.debug("Error cerrando browser", exc_info=True)
-        try:
             self._pw.stop()
             self.logger.info("Browser closed for %s", self.account.name)
         except Exception:
             self.logger.warning(
                 "Error closing Playwright for %s", self.account.name, exc_info=True
             )
+        # Liberar lock file del profile persistente (si existe)
+        try:
+            lock_file = (
+                Path(__file__).resolve().parent
+                / "browser_profiles"
+                / self.account.name
+                / ".lock"
+            )
+            if lock_file.exists():
+                lock_file.unlink()
+        except Exception:
+            self.logger.debug("No se pudo eliminar .lock del profile", exc_info=True)
