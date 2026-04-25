@@ -124,18 +124,6 @@ def health():
 ADMIN_KEY        = os.getenv("ADMIN_KEY", "").strip()
 OPENCLAW_API_KEY = os.getenv("OPENCLAW_API_KEY", "").strip()
 
-# [FIX P0-1] SECRET_KEY dedicada para signing de sesiones — DISTINTA de ADMIN_KEY.
-# Si ADMIN_KEY == secret_key, un atacante con la cookie podría decodificar el payload
-# y forjar sesiones usando la misma clave. SESSION_SECRET resuelve esto.
-_SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip()
-app.secret_key = _SESSION_SECRET if _SESSION_SECRET else secrets.token_hex(32)
-if not _SESSION_SECRET:
-    logger.warning(
-        "[security] SESSION_SECRET no configurado — usando clave volátil. "
-        "Las sesiones admin se invalidarán en cada reinicio. "
-        "Añade SESSION_SECRET=<token-aleatorio-largo> a .env"
-    )
-
 logger = logging.getLogger("api_server")
 logger.setLevel(logging.INFO)
 
@@ -144,6 +132,16 @@ _ch.setFormatter(
     logging.Formatter("%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
 )
 logger.addHandler(_ch)
+
+# [FIX P0-1] SESSION_SECRET dedicado para signing de sesiones — DISTINTO de ADMIN_KEY.
+_SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip()
+app.secret_key = _SESSION_SECRET if _SESSION_SECRET else secrets.token_hex(32)
+if not _SESSION_SECRET:
+    logger.warning(
+        "[security] SESSION_SECRET no configurado — usando clave volátil. "
+        "Las sesiones admin se invalidarán en cada reinicio. "
+        "Añade SESSION_SECRET=<token-aleatorio-largo> a .env"
+    )
 
 UPLOAD_DIR = Path(__file__).resolve().parent / "uploaded_images"
 
@@ -203,14 +201,38 @@ def admin_required(f):
 # ---------------------------------------------------------------------------
 # Validaciones de input admin
 # ---------------------------------------------------------------------------
-_NAME_RE = re.compile(r"^[a-z0-9_]{1,30}$")
+_NAME_RE  = re.compile(r"^[a-z0-9_]{1,30}$")
+_PHONE_RE = re.compile(r"^\+?[0-9]{7,15}$")
+
+
+def _validate_login_id(login_id: str) -> str | None:
+    """Valida un identificador de login: correo electrónico o número de teléfono.
+
+    Acepta:
+      - Correo:    user@dominio.com
+      - Teléfono:  +521234567890 o 521234567890 (7-15 dígitos, + opcional)
+    Retorna None si es válido, o un mensaje de error descriptivo.
+    """
+    if not login_id:
+        return "El correo o número de teléfono es obligatorio"
+    if "@" in login_id:
+        if "." not in login_id.split("@")[-1]:
+            return "Correo electrónico inválido"
+    else:
+        if not _PHONE_RE.match(login_id):
+            return (
+                "Identificador inválido: ingresa un correo (user@dominio.com) "
+                "o número de teléfono (ej: +521234567890)"
+            )
+    return None
 
 
 def _validate_account_input(name: str, email: str, groups: list) -> str | None:
     if not _NAME_RE.match(name):
         return "Nombre inválido: solo letras minúsculas, números y _ (máx 30)"
-    if "@" not in email or "." not in email.split("@")[-1]:
-        return "Correo electrónico inválido"
+    err = _validate_login_id(email)
+    if err:
+        return err
     if not isinstance(groups, list) or not groups:
         return "Debes proporcionar al menos un grupo"
     for g in groups:
@@ -601,7 +623,7 @@ def admin_login_page():
 def admin_login():
     # [FIX P1-4] Rate limiting en login — previene brute force contra ADMIN_KEY
     ip = request.remote_addr or "unknown"
-    if job_store.is_rate_limited(ip, limit=_RATE_LIMIT, window=_RATE_WINDOW):
+    if job_store.is_rate_limited(ip, "admin_login", _RATE_LIMIT, _RATE_WINDOW):
         logger.warning("Rate limit en /admin/login para %s", ip)
         if request.is_json:
             return jsonify({"error": "Demasiados intentos, espera un momento"}), 429

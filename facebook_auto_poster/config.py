@@ -237,12 +237,17 @@ def _load_accounts_from_env(global_password: str) -> list[AccountConfig]:
     for name in names:
         prefix = name.upper()
 
-        email = os.getenv(f"{prefix}_EMAIL", "").strip()
+        # Acepta EMAIL o PHONE como identificador de login — ambos se escriben
+        # en el campo email del formulario de Facebook, que admite los dos.
+        email = (
+            os.getenv(f"{prefix}_EMAIL", "").strip()
+            or os.getenv(f"{prefix}_PHONE", "").strip()
+        )
         groups_raw = os.getenv(f"{prefix}_GROUPS", "").strip()
 
         missing: list[str] = []
         if not email:
-            missing.append(f"{prefix}_EMAIL")
+            missing.append(f"{prefix}_EMAIL (o {prefix}_PHONE)")
         if not groups_raw:
             missing.append(f"{prefix}_GROUPS")
 
