@@ -76,6 +76,7 @@ Elevar el proyecto **Facebook Auto-Poster** a un estado donde:
 
 - [01_FASE_1.md](01_FASE_1.md) — Crítica (stop-the-bleeding)
 - [02_FASE_2.md](02_FASE_2.md) — Hardening
+- [04_PROPUESTA_FASE_2_10.md](04_PROPUESTA_FASE_2_10.md) — **PROPUESTA:** Auto-descubrimiento de grupos (pendiente aprobación)
 - [03_FASE_3.md](03_FASE_3.md) — Refactor arquitectónico
 
 ## Estado de fases (2026-04-24)
