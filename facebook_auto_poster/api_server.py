@@ -22,6 +22,7 @@ Endpoints admin (requieren autenticación con ADMIN_KEY):
     GET    /admin/api/history               → historial de logins
 """
 
+import json
 import logging
 import os
 import re
@@ -29,7 +30,7 @@ import secrets
 import threading
 import time
 import uuid
-from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -41,8 +42,42 @@ from config import CONFIG, load_accounts
 from account_manager import AccountManager
 import job_store
 import webhook
+try:
+    from crypto import encrypt_password as _encrypt_password
+    _CRYPTO_AVAILABLE = True
+except ImportError:
+    _encrypt_password = None  # type: ignore[assignment]
+    _CRYPTO_AVAILABLE = False
 
 app = Flask(__name__)
+
+# Timestamp del arranque para reportar uptime en /health
+_START_TIME = time.time()
+
+# ---------------------------------------------------------------------------
+# Pool de workers (Fase 2.3)
+# ---------------------------------------------------------------------------
+# ThreadPoolExecutor con límite → evita que 10 requests simultáneos lancen
+# 10 Chromes. sync_playwright + threading no es oficialmente thread-safe,
+# pero con max_concurrent_workers <= 2-3 y locks por cuenta funciona en
+# la práctica. Cada lock garantiza que una misma cuenta no tenga dos
+# browsers/jobs compitiendo por el mismo user_data_dir.
+_executor = ThreadPoolExecutor(
+    max_workers=CONFIG.get("max_concurrent_workers", 2),
+    thread_name_prefix="fb-worker",
+)
+_account_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
+_running_accounts: set[str] = set()
+_running_accounts_lock = threading.Lock()
+
+
+def _get_account_lock(name: str) -> threading.Lock:
+    """Retorna el Lock asociado a una cuenta, creándolo si no existe."""
+    with _locks_guard:
+        if name not in _account_locks:
+            _account_locks[name] = threading.Lock()
+        return _account_locks[name]
 
 
 @app.get("/")
@@ -57,14 +92,49 @@ def service_worker():
 def manifest():
     return send_from_directory("static", "manifest.json", mimetype="application/manifest+json")
 
+
+# ---------------------------------------------------------------------------
+# Healthcheck — público, sin info sensible
+# ---------------------------------------------------------------------------
+@app.get("/health")
+def health():
+    """Liveness/readiness probe para OpenClaw y monitoreo externo."""
+    try:
+        with job_store._connect() as conn:
+            conn.execute("SELECT 1").fetchone()
+        db_ok = True
+    except Exception:
+        db_ok = False
+
+    active_accounts = job_store.count_active_accounts() if db_ok else 0
+    pending = job_store.count_pending_jobs() if db_ok else -1
+
+    status = "ok" if (db_ok and active_accounts > 0) else "degraded"
+    return jsonify({
+        "status": status,
+        "db": db_ok,
+        "active_accounts": active_accounts,
+        "pending_jobs": pending,
+        "uptime_s": int(time.time() - _START_TIME),
+    }), (200 if status == "ok" else 503)
+
 # ---------------------------------------------------------------------------
 # Claves y configuración de seguridad
 # ---------------------------------------------------------------------------
-ADMIN_KEY       = os.getenv("ADMIN_KEY", "").strip()
+ADMIN_KEY        = os.getenv("ADMIN_KEY", "").strip()
 OPENCLAW_API_KEY = os.getenv("OPENCLAW_API_KEY", "").strip()
 
-# Firma las session cookies del panel admin
-app.secret_key = ADMIN_KEY if ADMIN_KEY else secrets.token_hex(32)
+# [FIX P0-1] SECRET_KEY dedicada para signing de sesiones — DISTINTA de ADMIN_KEY.
+# Si ADMIN_KEY == secret_key, un atacante con la cookie podría decodificar el payload
+# y forjar sesiones usando la misma clave. SESSION_SECRET resuelve esto.
+_SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip()
+app.secret_key = _SESSION_SECRET if _SESSION_SECRET else secrets.token_hex(32)
+if not _SESSION_SECRET:
+    logger.warning(
+        "[security] SESSION_SECRET no configurado — usando clave volátil. "
+        "Las sesiones admin se invalidarán en cada reinicio. "
+        "Añade SESSION_SECRET=<token-aleatorio-largo> a .env"
+    )
 
 logger = logging.getLogger("api_server")
 logger.setLevel(logging.INFO)
@@ -81,24 +151,10 @@ UPLOAD_DIR = Path(__file__).resolve().parent / "uploaded_images"
 _ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 # ---------------------------------------------------------------------------
-# Rate limiter simple en memoria (por IP, ventana deslizante)
+# Rate limiter — persistente en SQLite (sobrevive a reinicios)
 # ---------------------------------------------------------------------------
-_rate_data: defaultdict[str, list[float]] = defaultdict(list)
-_rate_lock = threading.Lock()
-_RATE_LIMIT   = 10   # máx requests
-_RATE_WINDOW  = 60   # por ventana de N segundos
-
-
-def _is_rate_limited(ip: str) -> bool:
-    now = time.monotonic()
-    with _rate_lock:
-        hits = _rate_data[ip]
-        # Eliminar hits fuera de la ventana
-        _rate_data[ip] = [t for t in hits if now - t < _RATE_WINDOW]
-        if len(_rate_data[ip]) >= _RATE_LIMIT:
-            return True
-        _rate_data[ip].append(now)
-        return False
+_RATE_LIMIT  = 10   # máx requests por ventana
+_RATE_WINDOW = 60   # ventana en segundos
 
 
 # ---------------------------------------------------------------------------
@@ -118,8 +174,9 @@ def openclaw_required(f):
             return jsonify({"error": "API key inválida o ausente"}), 401
 
         ip = request.remote_addr or "unknown"
-        if _is_rate_limited(ip):
-            logger.warning("Rate limit alcanzado para %s", ip)
+        endpoint = request.endpoint or request.path
+        if job_store.is_rate_limited(ip, endpoint, _RATE_LIMIT, _RATE_WINDOW):
+            logger.warning("Rate limit alcanzado para %s en %s", ip, endpoint)
             return jsonify({"error": "Demasiadas peticiones, espera un momento"}), 429
 
         return f(*args, **kwargs)
@@ -275,12 +332,57 @@ def _resolve_accounts(
     return accounts, None
 
 
+def _filter_rate_limited_accounts(accounts):
+    """Aparta cuentas que ya alcanzaron su tope por hora/día.
+
+    Retorna (ok, skipped) donde skipped es lista de (account, reason).
+    """
+    max_h = CONFIG.get("max_posts_per_account_per_hour", 3)
+    max_d = CONFIG.get("max_posts_per_account_per_day", 15)
+    ok, skipped = [], []
+    for a in accounts:
+        h = job_store.account_recent_post_count(a.name, window_minutes=60)
+        if h >= max_h:
+            skipped.append((a, f"rate_limit_h={h}/{max_h}"))
+            continue
+        d = job_store.account_recent_post_count(a.name, window_minutes=24 * 60)
+        if d >= max_d:
+            skipped.append((a, f"rate_limit_d={d}/{max_d}"))
+            continue
+        ok.append(a)
+    return ok, skipped
+
+
 def _run_job(job_id: str, accounts, text: str,
              image_path: str | None, callback_url: str | None) -> None:
+    # Adquirir locks por cuenta en orden lexicográfico para prevenir deadlocks
+    # cuando dos jobs comparten cuentas en distintos órdenes.
+    accounts_sorted = sorted(accounts, key=lambda a: a.name)
+    locks = [_get_account_lock(a.name) for a in accounts_sorted]
+    for lk in locks:
+        lk.acquire()
+    for a in accounts_sorted:
+        with _running_accounts_lock:
+            _running_accounts.add(a.name)
+
     job_store.mark_running(job_id)
     try:
+        # Rate limit por cuenta: filtrar las que excedieron su tope
+        runnable, skipped = _filter_rate_limited_accounts(accounts)
+        for acc, reason in skipped:
+            logger.warning(
+                "Job %s: cuenta %s saltada (%s)",
+                job_id, acc.name, reason,
+            )
+        if not runnable:
+            msg = f"Todas las cuentas excedieron su rate limit ({len(skipped)} saltadas)"
+            logger.warning("Job %s: %s", job_id, msg)
+            job_store.mark_failed(job_id, msg)
+            webhook.fire(callback_url, job_id, "failed", error_msg=msg)
+            return
+
         mgr = AccountManager(
-            accounts, CONFIG, text,
+            runnable, CONFIG, text,
             image_path=image_path, callback_url=callback_url,
         )
         results = mgr.run()
@@ -292,11 +394,65 @@ def _run_job(job_id: str, accounts, text: str,
         job_store.mark_failed(job_id, "Unhandled exception in worker")
         webhook.fire(callback_url, job_id, "failed",
                      error_msg="Unhandled exception in worker")
+    finally:
+        for a in accounts_sorted:
+            with _running_accounts_lock:
+                _running_accounts.discard(a.name)
+        for lk in reversed(locks):
+            try:
+                lk.release()
+            except RuntimeError:
+                pass
+
+
+def _enqueue_job(job_id: str, accounts, text: str,
+                 image_path: str | None, callback_url: str | None) -> None:
+    """Envía un job al pool. Max_workers limita la concurrencia global."""
+    _executor.submit(_run_job, job_id, accounts, text, image_path, callback_url)
+
+
+def shutdown_executor(wait: bool = False) -> None:
+    """Detiene el pool. Invocado desde main.py en graceful shutdown.
+
+    wait=False por default: no bloquea al signal handler; los browsers
+    abiertos se cierran cuando terminen sus operaciones activas. Los
+    jobs en cola se descartan (se reencolan en el próximo arranque
+    por la lógica de orphan recovery de 2.4).
+    """
+    try:
+        _executor.shutdown(wait=wait, cancel_futures=True)
+    except Exception:
+        logger.exception("Error cerrando ThreadPoolExecutor")
 
 
 # ===========================================================================
 # ENDPOINTS OPENCLAW (todos protegidos con X-API-Key)
 # ===========================================================================
+
+@app.get("/health/detailed")
+@openclaw_required
+def health_detailed():
+    """Healthcheck completo — requiere X-API-Key."""
+    try:
+        with job_store._connect() as conn:
+            conn.execute("SELECT 1").fetchone()
+        db_ok = True
+    except Exception:
+        db_ok = False
+
+    if not db_ok:
+        return jsonify({"status": "degraded", "db": False}), 503
+
+    return jsonify({
+        "status": "ok",
+        "db": True,
+        "uptime_s": int(time.time() - _START_TIME),
+        "active_accounts": job_store.count_active_accounts(),
+        "banned_accounts": len(job_store.list_active_bans()),
+        "jobs_by_status": job_store.count_jobs_by_status(),
+        "recent_bans": job_store.list_recent_bans(limit=10),
+    })
+
 
 @app.get("/accounts")
 @openclaw_required
@@ -345,13 +501,8 @@ def handle_post():
     logger.info("Job %s aceptado | cuentas=%s", job_id,
                 [a.name for a in accounts])
 
-    threading.Thread(
-        target=_run_job,
-        args=(job_id, accounts, payload["text"],
-              payload["image_path"], payload["callback_url"]),
-        daemon=True,
-        name=f"worker-{job_id}",
-    ).start()
+    _enqueue_job(job_id, accounts, payload["text"],
+                 payload["image_path"], payload["callback_url"])
 
     return jsonify({
         "status": "accepted",
@@ -379,7 +530,9 @@ def create_schedule():
             "error": "Formato inválido para 'scheduled_for'. Usa ISO 8601, ej: 2026-04-18T15:30:00"
         }), 400
 
-    if when <= datetime.now():
+    from datetime import timezone as _tz
+    now_cmp = datetime.now(_tz.utc) if when.tzinfo else datetime.now()
+    if when <= now_cmp:
         return jsonify({"error": "'scheduled_for' debe ser en el futuro"}), 400
 
     _, err = _resolve_accounts(payload["accounts"])
@@ -446,6 +599,14 @@ def admin_login_page():
 
 @app.post("/admin/login")
 def admin_login():
+    # [FIX P1-4] Rate limiting en login — previene brute force contra ADMIN_KEY
+    ip = request.remote_addr or "unknown"
+    if job_store.is_rate_limited(ip, limit=_RATE_LIMIT, window=_RATE_WINDOW):
+        logger.warning("Rate limit en /admin/login para %s", ip)
+        if request.is_json:
+            return jsonify({"error": "Demasiados intentos, espera un momento"}), 429
+        return render_template("admin_login.html", error="Demasiados intentos, espera un momento"), 429
+
     data = request.get_json(silent=True) or {}
     key = (data.get("key") or request.form.get("key") or "").strip()
 
@@ -486,7 +647,12 @@ def admin_panel():
 @app.get("/admin/api/accounts")
 @admin_required
 def admin_list_accounts():
-    return jsonify(job_store.list_accounts_full())
+    rows = job_store.list_accounts_full()
+    # Transformar: no exponer el token cifrado al frontend,
+    # solo indicar si la cuenta tiene una contraseña distinta a la principal.
+    for r in rows:
+        r["has_custom_password"] = bool(r.pop("password_enc", None))
+    return jsonify(rows)
 
 
 @app.post("/admin/api/accounts")
@@ -538,6 +704,60 @@ def admin_delete_account(name: str):
         return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
     logger.info("Cuenta '%s' eliminada via admin", name)
     return "", 204
+
+
+@app.post("/admin/api/accounts/<name>/password")
+@admin_required
+def admin_set_account_password(name: str):
+    """
+    Establece o elimina la contraseña individual de una cuenta.
+
+    - Body {"password": "<texto>"} → cifra y guarda (cuenta usará ésta)
+    - Body {"password": null} o {"password": ""} → borra la individual;
+      la cuenta vuelve a usar FB_PASSWORD (contraseña principal)
+
+    La contraseña nunca se loguea ni se retorna en claro.
+    El 98% de las cuentas usa la contraseña principal — solo configura
+    una individual para cuentas con credenciales distintas.
+    """
+    data = request.get_json(silent=True) or {}
+    plain = (data.get("password") or "").strip()
+
+    # --- Limpiar: restaurar contraseña principal global ---
+    if not plain:
+        found = job_store.clear_account_password(name)
+        if not found:
+            return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
+        logger.info("Password individual eliminado para '%s' — usará FB_PASSWORD", name)
+        return jsonify({
+            "status": "reset_to_default",
+            "account": name,
+            "message": "La cuenta ahora usa la contraseña principal (FB_PASSWORD)",
+        })
+
+    # --- Establecer contraseña individual ---
+    if not _CRYPTO_AVAILABLE or _encrypt_password is None:
+        return jsonify({
+            "error": "Módulo de cifrado no disponible. "
+                     "Instala: pip install cryptography"
+        }), 503
+
+    if len(plain) < 6:
+        return jsonify({"error": "La contraseña debe tener al menos 6 caracteres"}), 400
+    if len(plain) > 256:
+        return jsonify({"error": "La contraseña no puede superar 256 caracteres"}), 400
+
+    try:
+        encrypted = _encrypt_password(plain)
+    except Exception as exc:
+        logger.error("Error cifrando password para '%s': %s", name, exc)
+        return jsonify({"error": "Error interno al cifrar la contraseña"}), 500
+
+    if not job_store.set_account_password(name, encrypted):
+        return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
+
+    logger.info("Password individual configurado para cuenta '%s'", name)
+    return jsonify({"status": "updated", "account": name})
 
 
 # ===========================================================================
@@ -601,6 +821,20 @@ def admin_clear_ban(name: str):
     return jsonify({"ok": True, "account": name})
 
 
+@app.get("/admin/api/queue")
+@admin_required
+def admin_queue_status():
+    """Estado del pool de workers en tiempo real."""
+    with _running_accounts_lock:
+        in_progress = sorted(_running_accounts)
+    return jsonify({
+        "max_workers": CONFIG.get("max_concurrent_workers", 2),
+        "accounts_in_progress": in_progress,
+        "pending_jobs": job_store.count_pending_jobs(),
+        "jobs_by_status": job_store.count_jobs_by_status(),
+    })
+
+
 # ===========================================================================
 # ADMIN — Página de publicación
 # ===========================================================================
@@ -644,12 +878,7 @@ def admin_post():
     logger.info("Job %s aceptado via admin | cuentas=%s", job_id,
                 [a.name for a in accounts])
 
-    threading.Thread(
-        target=_run_job,
-        args=(job_id, accounts, payload["text"], payload["image_path"], None),
-        daemon=True,
-        name=f"worker-{job_id}",
-    ).start()
+    _enqueue_job(job_id, accounts, payload["text"], payload["image_path"], None)
 
     return jsonify({
         "status": "accepted",
@@ -677,7 +906,10 @@ def admin_create_schedule():
             "error": "Formato inválido para 'scheduled_for'. Usa ISO 8601, ej: 2026-04-20T15:30:00"
         }), 400
 
-    if when <= datetime.now():
+    # [FIX P1-1] Comparar aware vs naive correctamente para evitar TypeError
+    from datetime import timezone as _tz
+    now_cmp = datetime.now(_tz.utc) if when.tzinfo else datetime.now()
+    if when <= now_cmp:
         return jsonify({"error": "'scheduled_for' debe ser en el futuro"}), 400
 
     _, err = _resolve_accounts(payload["accounts"])

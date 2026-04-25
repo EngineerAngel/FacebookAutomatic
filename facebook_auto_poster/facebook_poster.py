@@ -20,7 +20,6 @@ import time
 from pathlib import Path
 
 from patchright.sync_api import (
-    Browser,
     BrowserContext,
     Page,
     TimeoutError as PatchrightTimeout,
@@ -39,6 +38,7 @@ import job_store
 import webhook
 from gemini_commenter import GeminiCommenter
 from human_browsing import HumanBrowsing
+from text_variation import TextVariator
 
 # ---------------------------------------------------------------------------
 # Text-variation helpers
@@ -137,8 +137,12 @@ class FacebookPoster:
         self._window_y_offset = pos_y + _CHROME_UI_Y_OFFSET
 
         # -- Playwright lifecycle ----------------------------------------
+        # launch_persistent_context no expone Browser separado; self.browser
+        # se conserva como None por retrocompatibilidad con código legacy
+        # que solo lo usaba en close().
+        self.browser = None
         self._pw = sync_playwright().start()
-        self.browser, self.context, self.page = self._build_browser()
+        self.context, self.page = self._build_browser()
 
         # -- Emunium (standalone, opera en coords OS) --------------------
         self._em = None
@@ -165,6 +169,26 @@ class FacebookPoster:
                 logger=self.logger,
             )
 
+        # -- Text variator (Gemini paraphrase, Fase 2.2) -----------------
+        self._text_variator: TextVariator | None = None
+        if config.get("text_variation_mode", "off") == "gemini":
+            api_keys = config.get("gemini_api_keys", [])
+            if isinstance(api_keys, str):
+                api_keys = [api_keys]
+            _gemini_for_variation = self._gemini or (
+                GeminiCommenter(
+                    api_keys=api_keys,
+                    model=config.get("gemini_model", "gemini-2.5-flash"),
+                    timeout=config.get("gemini_timeout", 15),
+                    lang=config.get("gemini_comment_lang", "es-MX"),
+                    logger=self.logger,
+                ) if api_keys else None
+            )
+            self._text_variator = TextVariator(
+                gemini=_gemini_for_variation,
+                logger=self.logger,
+            )
+
         # -- Human browsing (warmup antes de publicar) -------------------
         self._browsing: HumanBrowsing | None = None
         if config.get("human_browsing_enabled", False):
@@ -177,46 +201,126 @@ class FacebookPoster:
     # ------------------------------------------------------------------ #
     # Browser setup
     # ------------------------------------------------------------------ #
-    def _build_browser(self) -> tuple[Browser, BrowserContext, Page]:
-        self.logger.info("[Driver] Construyendo browser Patchright para %s ...", self.account.name)
+    def _resolve_user_data_dir(self) -> Path:
+        """Resuelve el user_data_dir para esta cuenta. Maneja profiles corruptos.
 
-        w, h = self.config["browser_window_size"]
+        Si existe un .lock file (dejado por un Chrome crasheado), renombra el
+        profile a <name>.corrupt.<ts> y crea uno nuevo. Esto previene que un
+        crash previo bloquee arranques futuros.
+        """
+        base = Path(__file__).resolve().parent / "browser_profiles"
+        base.mkdir(parents=True, exist_ok=True)
+        profile_dir = base / self.account.name
+        lock_file = profile_dir / ".lock"
+
+        if lock_file.exists():
+            corrupt_name = f"{self.account.name}.corrupt.{int(time.time())}"
+            corrupt_dir = base / corrupt_name
+            self.logger.warning(
+                "[Driver] Profile %s tiene .lock stale — renombrando a %s",
+                self.account.name, corrupt_name,
+            )
+            try:
+                profile_dir.rename(corrupt_dir)
+            except Exception:
+                self.logger.exception("[Driver] Error renombrando profile corrupto")
+
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        # Escribir lock file; se limpia en close()
+        try:
+            lock_file.touch(exist_ok=True)
+        except Exception:
+            pass
+        return profile_dir
+
+    def _migrate_cookies_if_needed(self, context: "BrowserContext", profile_dir: Path) -> None:
+        """Inyecta cookies de account_cookies en el context la primera vez.
+
+        Cuando el profile es nuevo (sin cookies), migra desde la tabla legacy
+        una sola vez. A partir de ahí el profile persiste cookies localmente.
+        """
+        marker = profile_dir / ".cookies_migrated"
+        if marker.exists():
+            return
+        try:
+            cookies = job_store.load_cookies(self.account.email)
+            if cookies:
+                context.add_cookies(cookies)
+                self.logger.info(
+                    "[Driver] Migradas %d cookies desde DB al profile persistente",
+                    len(cookies),
+                )
+            marker.touch()
+        except Exception:
+            self.logger.warning("[Driver] Falló migración de cookies", exc_info=True)
+
+    def _build_browser(self) -> tuple[BrowserContext, Page]:
+        fp = self.account.fingerprint
+        w, h = fp.get("viewport", self.config["browser_window_size"])
         pos_x, pos_y = self.config.get("browser_window_position", (0, 0))
         headless = bool(self.config["browser_headless"])
+        locale = fp.get("locale", "es-MX")
+
+        self.logger.info("[Driver] Construyendo browser | cuenta=%s fp=%s",
+                         self.account.name, fp.get("id", "generico"))
 
         args = [
             f"--window-position={pos_x},{pos_y}",
             f"--window-size={w},{h}",
             "--disable-notifications",
-            "--lang=es",
+            f"--lang={locale.split('-')[0]}",
+            "--disable-blink-features=AutomationControlled",
         ]
 
         if headless:
             self.logger.info("[Driver] Modo headless activado")
 
-        user_agent = (
+        user_agent = fp.get("user_agent") or (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
+            "Chrome/132.0.0.0 Safari/537.36"
         )
 
+        user_data_dir = self._resolve_user_data_dir()
+
         try:
-            browser = self._pw.chromium.launch(headless=headless, args=args)
+            context = self._pw.chromium.launch_persistent_context(
+                user_data_dir=str(user_data_dir),
+                headless=headless,
+                args=args,
+                user_agent=user_agent,
+                viewport={"width": w, "height": h},
+                locale=locale,
+                timezone_id=fp.get("timezone") or self.account.timezone,
+                color_scheme=fp.get("color_scheme", "light"),
+                extra_http_headers={
+                    "sec-ch-ua": fp.get("sec_ch_ua", ""),
+                    "sec-ch-ua-platform": fp.get("sec_ch_ua_platform", '"Windows"'),
+                    "sec-ch-ua-mobile": "?0",
+                },
+            )
         except Exception:
             self.logger.error("[Driver] FALLO al lanzar Chromium parcheado", exc_info=True)
             raise
 
-        context = browser.new_context(
-            user_agent=user_agent,
-            viewport={"width": w, "height": h},
-            locale="es-ES",
-        )
+        # Override de propiedades JS del navegador para coherencia con el UA
+        hw = fp.get("hardware_concurrency", 8)
+        dm = fp.get("device_memory", 8)
+        platform = fp.get("platform", "Win32")
+        context.add_init_script(f"""
+            Object.defineProperty(navigator, 'hardwareConcurrency', {{get: () => {hw}}});
+            Object.defineProperty(navigator, 'deviceMemory', {{get: () => {dm}}});
+            Object.defineProperty(navigator, 'platform', {{get: () => '{platform}'}});
+        """)
+
         # Timeout por defecto (ms) para operaciones que no lo especifiquen
         context.set_default_timeout(self.config.get("implicit_wait", 10) * 1000)
 
-        page = context.new_page()
-        self.logger.info("[Driver] Patchright listo. URL inicial: %s", page.url or "(blank)")
-        return browser, context, page
+        self._migrate_cookies_if_needed(context, user_data_dir)
+
+        page = context.pages[0] if context.pages else context.new_page()
+        self.logger.info("[Driver] Patchright listo | ua=%s...", user_agent[:50])
+        return context, page
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -1128,10 +1232,7 @@ class FacebookPoster:
         Returns a dict mapping group_id -> success boolean.
         """
         results: dict[str, bool] = {}
-
-        if self.config.get("text_variation_mode", False):
-            text = _vary_text(text, self.account.name)
-            self.logger.debug("Text variation applied for %s", self.account.name)
+        variation_mode = self.config.get("text_variation_mode", "off")
 
         groups = self.account.groups[: self.config["max_groups_per_session"]]
 
@@ -1155,7 +1256,19 @@ class FacebookPoster:
                     results[remaining] = False
                 break
 
-            success = self.publish(group_id, text, image_path=image_path)
+            # Variación de texto por (cuenta, grupo) — diferente para cada destino
+            group_text = text
+            if variation_mode == "gemini" and self._text_variator:
+                group_text = self._text_variator.variate(text, self.account.name, group_id)
+            elif variation_mode == "zero_width":
+                group_text = _vary_text(text, self.account.name)
+
+            self.logger.debug(
+                "[Variation] mode=%s account=%s group=%s orig=%d final=%d chars",
+                variation_mode, self.account.name, group_id, len(text), len(group_text),
+            )
+
+            success = self.publish(group_id, group_text, image_path=image_path)
             results[group_id] = success
 
             # Wait between groups, but not after the last one
@@ -1180,13 +1293,21 @@ class FacebookPoster:
         except Exception:
             self.logger.debug("Error cerrando context", exc_info=True)
         try:
-            self.browser.close()
-        except Exception:
-            self.logger.debug("Error cerrando browser", exc_info=True)
-        try:
             self._pw.stop()
             self.logger.info("Browser closed for %s", self.account.name)
         except Exception:
             self.logger.warning(
                 "Error closing Playwright for %s", self.account.name, exc_info=True
             )
+        # Liberar lock file del profile persistente (si existe)
+        try:
+            lock_file = (
+                Path(__file__).resolve().parent
+                / "browser_profiles"
+                / self.account.name
+                / ".lock"
+            )
+            if lock_file.exists():
+                lock_file.unlink()
+        except Exception:
+            self.logger.debug("No se pudo eliminar .lock del profile", exc_info=True)

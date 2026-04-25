@@ -131,6 +131,28 @@ tr:hover td { background: #151823; }
 
 /* ─── Empty state ───────────────────────────────────────────────── */
 .empty { text-align: center; padding: 3rem; color: #475569; font-size: 0.9rem; }
+/* ─── Password toggle ────────────────────────────────────────────── */
+.pw-toggle {
+  display: flex; gap: 0.5rem; margin-bottom: 0.75rem;
+}
+.pw-toggle label {
+  flex: 1; display: flex; align-items: center; gap: 0.5rem;
+  background: #0f1117; border: 1px solid #2d3148; border-radius: 7px;
+  padding: 0.55rem 0.9rem; cursor: pointer; font-size: 0.85rem;
+  color: #94a3b8; transition: border-color 0.15s, color 0.15s;
+  margin-bottom: 0;
+}
+.pw-toggle input[type=radio] { accent-color: #7c8cf8; }
+.pw-toggle label:has(input:checked) {
+  border-color: #7c8cf8; color: #e2e8f0;
+}
+#f-pw-custom-wrap { display: none; }
+#f-pw-custom-wrap.visible { display: block; }
+.badge-custom-pw {
+  display: inline-block; background: #312e81; color: #a5b4fc;
+  border-radius: 4px; padding: 0.15rem 0.45rem; font-size: 0.72rem;
+  margin-left: 0.4rem; vertical-align: middle;
+}
 </style>
 </head>
 <body>
@@ -165,6 +187,7 @@ tr:hover td { background: #151823; }
           <tr>
             <th>Nombre</th>
             <th>Correo</th>
+            <th>Contraseña</th>
             <th>Grupos</th>
             <th>Último login</th>
             <th>Última publicación</th>
@@ -172,7 +195,7 @@ tr:hover td { background: #151823; }
           </tr>
         </thead>
         <tbody id="accounts-body">
-          <tr><td colspan="6" class="empty">Cargando...</td></tr>
+          <tr><td colspan="7" class="empty">Cargando...</td></tr>
         </tbody>
       </table>
     </div>
@@ -277,6 +300,26 @@ tr:hover td { background: #151823; }
       <input type="email" id="f-email" placeholder="maria@ejemplo.com">
     </div>
     <div class="field">
+      <label>Contraseña</label>
+      <div class="pw-toggle">
+        <label>
+          <input type="radio" name="pw-mode" id="pw-default" value="default" checked
+                 onchange="onPwModeChange()">
+          🔑 Principal (por defecto)
+        </label>
+        <label>
+          <input type="radio" name="pw-mode" id="pw-custom" value="custom"
+                 onchange="onPwModeChange()">
+          🔒 Contraseña propia
+        </label>
+      </div>
+      <div id="f-pw-custom-wrap">
+        <input type="password" id="f-password" placeholder="Mínimo 6 caracteres"
+               autocomplete="new-password" minlength="6" maxlength="256">
+        <p class="hint">Esta contraseña se cifra y se asigna solo a este correo.</p>
+      </div>
+    </div>
+    <div class="field">
       <label>IDs de grupos</label>
       <input type="text" id="f-groups" placeholder="111111111111, 222222222222, 333333333333">
       <p class="hint">Separados por coma. Son los IDs numéricos de los grupos de Facebook.</p>
@@ -337,7 +380,7 @@ async function loadAccounts() {
   const tbody = document.getElementById('accounts-body');
   tbody.innerHTML = '';
   if (!ok || !data.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">No hay cuentas configuradas</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No hay cuentas configuradas</td></tr>';
     return;
   }
   data.forEach(acc => {
@@ -349,6 +392,22 @@ async function loadAccounts() {
 
     const tdEmail = document.createElement('td');
     tdEmail.textContent = acc.email;
+
+    // ─── Columna contraseña ───
+    const tdPw = document.createElement('td');
+    if (acc.has_custom_password) {
+      const span = document.createElement('span');
+      span.className = 'badge-custom-pw';
+      span.textContent = '🔒 Propia';
+      span.title = 'Esta cuenta tiene una contraseña individual cifrada';
+      tdPw.appendChild(span);
+    } else {
+      const span = document.createElement('span');
+      span.className = 'badge';
+      span.textContent = '🔑 Principal';
+      span.title = 'Usa FB_PASSWORD (contraseña compartida por defecto)';
+      tdPw.appendChild(span);
+    }
 
     const tdGroups = document.createElement('td');
     const badge = document.createElement('span');
@@ -380,12 +439,20 @@ async function loadAccounts() {
 
     tr.appendChild(tdName);
     tr.appendChild(tdEmail);
+    tr.appendChild(tdPw);
     tr.appendChild(tdGroups);
     tr.appendChild(tdLogin);
     tr.appendChild(tdPub);
     tr.appendChild(tdAcc);
     tbody.appendChild(tr);
   });
+}
+
+function onPwModeChange() {
+  const mode = document.querySelector('input[name="pw-mode"]:checked').value;
+  const wrap = document.getElementById('f-pw-custom-wrap');
+  wrap.classList.toggle('visible', mode === 'custom');
+  if (mode !== 'custom') document.getElementById('f-password').value = '';
 }
 
 function openModal(acc = null) {
@@ -396,6 +463,13 @@ function openModal(acc = null) {
   document.getElementById('f-email').value   = acc ? acc.email : '';
   const groups = acc ? JSON.parse(acc.groups || '[]') : [];
   document.getElementById('f-groups').value  = groups.join(', ');
+
+  // Inicializar selector de contraseña
+  document.getElementById('f-password').value = '';
+  const hasCustom = acc && acc.has_custom_password;
+  document.getElementById(hasCustom ? 'pw-custom' : 'pw-default').checked = true;
+  document.getElementById('f-pw-custom-wrap').classList.toggle('visible', !!hasCustom);
+
   document.getElementById('modal-bg').classList.add('open');
 }
 
@@ -409,17 +483,47 @@ async function saveAccount() {
   const email  = document.getElementById('f-email').value.trim();
   const rawG   = document.getElementById('f-groups').value;
   const groups = rawG.split(',').map(s => s.trim()).filter(Boolean);
+  const pwMode = document.querySelector('input[name="pw-mode"]:checked').value;
+  const pwVal  = document.getElementById('f-password').value.trim();
+
+  // Validar contraseña propia antes de guardar
+  if (pwMode === 'custom' && pwVal.length < 6) {
+    toast('La contraseña propia debe tener al menos 6 caracteres', true);
+    document.getElementById('f-password').focus();
+    return;
+  }
 
   const isEdit = editingName !== null;
   const method = isEdit ? 'PUT' : 'POST';
   const path   = isEdit ? `/admin/api/accounts/${editingName}` : '/admin/api/accounts';
 
-  // Siempre enviamos name para que el backend detecte si hubo rename
   const { ok, data } = await api(method, path, { name, email, groups });
   if (!ok) { toast(data.error || 'Error al guardar', true); return; }
+
+  // Nombre final (puede haber rename en edición)
+  const savedName = data.name || name;
+
+  // Guardar contraseña si corresponde
+  await setAccountPassword(savedName, pwMode, pwVal);
+
   toast(isEdit ? 'Cuenta actualizada' : 'Cuenta creada');
   closeModal();
   loadAccounts();
+}
+
+async function setAccountPassword(name, mode, plain) {
+  // mode='default' → limpiar password individual (vuelve a principal)
+  // mode='custom'  → cifrar y guardar si hay valor
+  const password = mode === 'custom' ? plain : null;
+  const { ok, data } = await api(
+    'POST',
+    `/admin/api/accounts/${name}/password`,
+    { password }
+  );
+  if (!ok) {
+    // No abortar el flujo, solo avisar
+    toast('Cuenta guardada. Aviso: ' + (data.error || 'error al guardar contraseña'), true);
+  }
 }
 
 async function deleteAccount(name) {

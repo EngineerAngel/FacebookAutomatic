@@ -7,11 +7,14 @@ OpenClaw u otro orquestador externo envía las órdenes vía POST /post.
 
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+from waitress import serve
 
 from config import CONFIG
 
@@ -40,30 +43,111 @@ main_logger.addHandler(_ch)
 
 
 # ---------------------------------------------------------------------------
-# Cloudflared tunnel (acceso público con HTTPS)
+# Cloudflared tunnel — multiplataforma (Windows / Mac / Ubuntu)
 # ---------------------------------------------------------------------------
-def start_cloudflared(port: int) -> None:
-    """Inicia cloudflared en un thread separado."""
-    PROJECT_ROOT = Path(__file__).resolve().parent.parent
-    cloudflared_exe = PROJECT_ROOT / "cloudflared.exe"
+def _find_cloudflared() -> str | None:
+    """
+    Localiza el binario cloudflared según el OS.
 
-    if not cloudflared_exe.exists():
-        main_logger.warning("cloudflared.exe no encontrado en %s — saltando túnel público", PROJECT_ROOT)
+    Orden de búsqueda:
+      1. PATH del sistema (instalado via brew, apt, winget, etc.)
+      2. Binario junto a la raíz del proyecto (fallback manual)
+
+    Retorna la ruta como str, o None si no se encuentra.
+    """
+    import platform
+    import shutil
+
+    # 1. Buscar en PATH (preferido — instalación limpia)
+    which = shutil.which("cloudflared")
+    if which:
+        return which
+
+    # 2. Fallback: binario manual junto al proyecto
+    system = platform.system()
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    candidates = {
+        "Windows": PROJECT_ROOT / "cloudflared.exe",
+        "Darwin":  PROJECT_ROOT / "cloudflared",
+        "Linux":   PROJECT_ROOT / "cloudflared",
+    }
+    candidate = candidates.get(system)
+    if candidate and candidate.exists():
+        return str(candidate)
+
+    return None
+
+
+def start_cloudflared(port: int) -> None:
+    """Inicia cloudflared en un thread daemon separado."""
+    import platform
+
+    exe = _find_cloudflared()
+    if not exe:
+        system = platform.system()
+        install_hint = {
+            "Darwin":  "brew install cloudflared",
+            "Linux":   "sudo apt install cloudflared",
+            "Windows": "winget install Cloudflare.cloudflared  o colocar cloudflared.exe junto al proyecto",
+        }.get(system, "ver https://developers.cloudflare.com/cloudflared")
+        main_logger.warning(
+            "cloudflared no encontrado — túnel público desactivado. Instalar: %s",
+            install_hint,
+        )
         return
 
-    def run_tunnel():
+    def run_tunnel() -> None:
         try:
-            main_logger.info("Iniciando Cloudflare Tunnel (acceso HTTPS público)...")
+            main_logger.info("Iniciando Cloudflare Tunnel en http://localhost:%d ...", port)
             subprocess.run(
-                [str(cloudflared_exe), "tunnel", "--url", f"http://localhost:{port}"],
-                check=False
+                [exe, "tunnel", "--url", f"http://localhost:{port}"],
+                check=False,
             )
-        except Exception as e:
-            main_logger.error("Error en cloudflared: %s", e)
+        except Exception as exc:
+            main_logger.error("Error en cloudflared: %s", exc)
 
-    thread = threading.Thread(target=run_tunnel, daemon=True)
+    thread = threading.Thread(target=run_tunnel, daemon=True, name="cloudflared")
     thread.start()
-    time.sleep(2)  # Dar tiempo a cloudflared para mostrar la URL
+    time.sleep(2)
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown — registrado antes de arrancar waitress
+# ---------------------------------------------------------------------------
+_shutting_down = threading.Event()
+
+
+def _install_signal_handlers() -> None:
+    """Registra handlers para SIGTERM/SIGINT.
+
+    Al recibir la señal:
+    1. Detiene scheduler_runner
+    2. Cancela jobs encolados en el ThreadPoolExecutor (2.3)
+    3. Marca jobs 'running' como 'interrupted' en DB
+    4. Sale del proceso — waitress atrapa la señal y cierra su loop
+    """
+    import api_server
+    import job_store
+    import scheduler_runner
+
+    def _handler(signum, _frame):
+        if _shutting_down.is_set():
+            return  # ya en shutdown — evitar re-entrada
+        _shutting_down.set()
+        main_logger.warning("Señal %s recibida — iniciando shutdown graceful", signum)
+        try:
+            scheduler_runner.stop()
+            api_server.shutdown_executor(wait=False)
+            n = job_store.mark_running_as_interrupted()
+            if n:
+                main_logger.info("Marcados %d jobs 'running' → 'interrupted'", n)
+        except Exception:
+            main_logger.exception("Error durante shutdown")
+        # Salir — waitress captura KeyboardInterrupt / SIGTERM y cierra su loop
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
 
 
 # ---------------------------------------------------------------------------
@@ -76,21 +160,34 @@ def main() -> None:
     from config import load_accounts
 
     job_store.init_db()
+
+    # Orphan recovery: jobs 'running' al arranque son de un crash previo
+    orphans = job_store.mark_running_as_interrupted()
+    if orphans:
+        main_logger.warning(
+            "Orphan recovery: %d jobs 'running' de un shutdown previo → 'interrupted'",
+            orphans,
+        )
+
     n = job_store.upsert_accounts(load_accounts())
     main_logger.info("Sincronizadas %d cuentas en DB", n)
     scheduler_runner.start()
 
+    _install_signal_handlers()
+
     port = CONFIG.get("api_port", 5000)
     main_logger.info(
-        "Facebook Auto-Poster arrancando — API 0.0.0.0:%d | scheduler activo", port
+        "Facebook Auto-Poster arrancando con waitress — API 0.0.0.0:%d | scheduler activo",
+        port,
     )
 
     # Iniciar cloudflared para acceso HTTPS público (opcional)
     start_cloudflared(port)
 
-    # use_reloader=False evita el proceso doble que Flask lanza en modo debug
-    # dentro de contenedores Docker esto es obligatorio
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
+    # waitress: servidor WSGI de producción (vs Flask dev server)
+    # threads=8 cubre requests HTTP del API — no tiene relación con los
+    # workers de browser (eso lo gestiona 2.3 con ThreadPoolExecutor separado)
+    serve(app, host="0.0.0.0", port=port, threads=8, ident="FBAutoPoster/1.0")
 
 
 if __name__ == "__main__":

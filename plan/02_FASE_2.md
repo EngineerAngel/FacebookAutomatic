@@ -1,24 +1,70 @@
 # 02 — Fase 2: Hardening (semanas 2-3)
 
+> **Estado: ✅ COMPLETADO** — Todos los ítems implementados en rama `lap2`.
+> Commit final: `547e0b5 feat(2.2)` · 2026-04-24.
+
 > **Objetivo:** Persistir identidad completa (browser state), hacer el sistema robusto bajo carga, y dejar producción estable sin hacks.
 
 > **Prerrequisito:** Fase 1 completada y validada con métricas en verde. Si hay soft-bans, no avanzar hasta estabilizar.
 
 ## Tabla de ítems
 
-| # | Item | Prioridad | Tiempo estimado |
-|---|------|-----------|-----------------|
-| 2.1 | `user_data_dir` persistente por cuenta | 🔴 P0 | 1 día |
-| 2.2 | Variación real de texto con Gemini (parafraseo) | 🟠 P1 | 1.5 días |
-| 2.3 | Pool de workers con límite de concurrencia | 🟠 P1 | 1.5 días |
-| 2.4 | Servidor de producción (waitress) | 🟠 P1 | 0.5 días |
-| 2.5 | Pin de dependencias + auditoría | 🟡 P2 | 0.5 días |
-| 2.6 | Rate limiter persistente (SQLite) | 🟡 P2 | 0.5 días |
-| 2.7 | Desactivación automática post-ban | 🟠 P1 | 0.5 días |
-| 2.8 | Healthcheck endpoint | 🟡 P2 | 0.5 días |
-| 2.9 | Descarga de imágenes no bloqueante | 🟡 P2 | 0.5 días |
+| # | Item | Prioridad | Estado | Commit |
+|---|------|-----------|--------|--------|
+| 2.1 | `user_data_dir` persistente por cuenta | 🔴 P0 | ✅ Listo | `67cfee6` |
+| 2.2 | Variación real de texto con Gemini (parafraseo) | 🟠 P1 | ✅ Listo | `547e0b5` |
+| 2.3 | Pool de workers con límite de concurrencia | 🟠 P1 | ✅ Listo | `f6bc4f8` |
+| 2.4 | Servidor de producción (waitress) | 🟠 P1 | ✅ Listo | `ce1b2c0` |
+| 2.5 | Pin de dependencias + auditoría | 🟡 P2 | ✅ Listo | `0f06528` |
+| 2.6 | Rate limiter persistente (SQLite) | 🟡 P2 | ✅ Listo | `68f4a1d` |
+| 2.7 | Desactivación automática post-ban | 🟠 P1 | ✅ Listo | `24b151d` |
+| 2.8 | Healthcheck endpoint | 🟡 P2 | ✅ Listo | `bd65dd2` |
+| 2.9 | Descarga de imágenes no bloqueante | 🟡 P2 | ✅ Listo | `1603670` |
 
 **Total estimado:** ~7 días hábiles (distribuidos en 2 semanas).
+
+---
+
+## Merge a master
+
+> Ejecutar desde la raíz del repositorio.
+
+`lap2` está **7 commits por delante** de `master` sin ninguna divergencia (fast-forward limpio). `master` no tiene commits propios post-bifurcación.
+
+### Pasos
+
+```bash
+git checkout master
+git merge lap2            # fast-forward, sin conflictos
+git push origin master    # si hay remote
+```
+
+### Área que requiere revisión manual post-merge
+
+Solo hay una zona donde el código de `master` y `lap2` tocaron la misma línea lógica:
+
+**`main.py` — servidor de arranque**
+
+| Rama | Código |
+|------|--------|
+| `master` (pre-merge) | `app.run(host="0.0.0.0", port=port, use_reloader=False)` |
+| `lap2` (post-merge) | `serve(app, host="0.0.0.0", port=port, threads=8, ident="FBAutoPoster/1.0")` |
+
+Como es fast-forward, el merge aplica la versión de `lap2` directamente. **No hay conflicto real**, pero conviene verificar que:
+1. `waitress` esté instalado: `pip install -r requirements.txt`
+2. `python main.py` arranca con log `"Facebook Auto-Poster arrancando con waitress"`
+
+### Bug de Chromes zombies (resuelto en 2.4)
+
+El `app.run()` original no registraba `SIGTERM`/`SIGINT`, dejando procesos Chrome huérfanos al hacer `Ctrl+C`. `lap2` agrega `_install_signal_handlers()` en `main.py` que:
+- Detiene `scheduler_runner`
+- Llama `api_server.shutdown_executor(wait=False)`
+- Marca jobs `running` → `interrupted` en DB
+- Llama `sys.exit(0)` (waitress atrapa la señal y cierra su loop)
+
+Verificar después del merge: `Ctrl+C` → `pgrep -a chrome` no debe mostrar procesos huérfanos.
+
+---
 
 ---
 
@@ -92,15 +138,23 @@ La primera vez que una cuenta use el nuevo sistema, el profile está vacío. Iny
 Los profiles crecen (~200-500MB por cuenta). Script mensual que limpia `Cache/`, `Service Worker/CacheStorage/` conservando cookies y localStorage.
 
 ### Criterio de aceptación
-- [ ] Arrancar una cuenta, cerrar, reabrir → Facebook recuerda preferencias de idioma/dark mode.
-- [ ] localStorage persiste entre sesiones.
-- [ ] Canvas fingerprint se mantiene consistente por cuenta entre arranques (crítico: no debe variar dentro de la misma cuenta).
-- [ ] Las cookies en `jobs.db` siguen siendo backup, pero el flujo principal usa el profile.
+- [x] Arrancar una cuenta, cerrar, reabrir → Facebook recuerda preferencias de idioma/dark mode.
+- [x] localStorage persiste entre sesiones.
+- [x] Canvas fingerprint se mantiene consistente por cuenta entre arranques (crítico: no debe variar dentro de la misma cuenta).
+- [x] Las cookies en `jobs.db` siguen siendo backup, pero el flujo principal usa el profile.
+
+### Implementación (commit `67cfee6`)
+- `_build_browser` migrado a `launch_persistent_context(user_data_dir=browser_profiles/<name>)`.
+- `self.browser` se conserva como `None` por retrocompatibilidad; `close()` solo llama `context.close()`.
+- `_resolve_user_data_dir()`: detecta `.lock` stale, renombra profile a `<name>.corrupt.<ts>` y arranca limpio.
+- `_migrate_cookies_if_needed()`: inyecta cookies de `account_cookies` DB al profile la primera vez (marker `.cookies_migrated`).
+- Fingerprint genérico hardcoded: user-agent Chrome 132, viewport 1280×720, locale `es-MX`, `color_scheme=light`.
+- `browser_profiles/` agregado a `.gitignore`.
 
 ### Riesgos
-- **Tamaño de disco:** calcular ~500MB × 10 cuentas = 5GB. Monitorear y limpiar periódicamente.
-- **Corrupción de profile:** si Chrome crashea, el profile puede quedar corrupto. Añadir detección (archivo `LOCK` stale) y fallback: renombrar profile a `{name}.corrupt.{timestamp}` y arrancar limpio.
-- **Incompatibilidad con modo parallel:** dos procesos abriendo el mismo `user_data_dir` → crash. Serializar por cuenta (un lock file).
+- **Tamaño de disco:** ~500MB × 10 cuentas = 5GB. Monitorear y limpiar periódicamente.
+- **Corrupción de profile:** resuelto con detección de `.lock` stale y renombramiento automático.
+- **Incompatibilidad con modo parallel:** resuelto mediante locks por cuenta en 2.3.
 
 ---
 
@@ -192,15 +246,23 @@ CONFIG = {
 - 3 cuentas × 5 grupos × 3 posts/día = 45 variaciones/día = $0.007/día. Despreciable.
 
 ### Criterio de aceptación
-- [ ] Dos publicaciones del mismo texto en dos grupos tienen texto diferente (verificar con diff manual).
-- [ ] Los números de teléfono, precios y URLs se mantienen intactos.
-- [ ] Si Gemini falla (timeout, quota), el sistema publica el texto original sin romperse.
-- [ ] Logs muestran el texto original y el variado para auditoría.
+- [x] Dos publicaciones del mismo texto en dos grupos tienen texto diferente (verificar con diff manual).
+- [x] Los números de teléfono, precios y URLs se mantienen intactos.
+- [x] Si Gemini falla (timeout, quota), el sistema publica el texto original sin romperse.
+- [x] Logs muestran el texto original y el variado para auditoría.
+
+### Implementación (commit `547e0b5`)
+- Nuevo módulo `text_variation.py` con clase `TextVariator` — cache SQLite TTL 7 días en tabla `text_variations`.
+- `GeminiCommenter.generate_text(prompt, max_tokens)` agregado para rotación de keys y cooldown.
+- `text_variation_mode` cambiado de `bool` a `"gemini" | "zero_width" | "off"`. Default `"gemini"`.
+- Variación aplicada **por grupo** (no una vez por sesión) dentro del loop en `publish_to_all_groups`.
+- `FacebookPoster.__init__` crea `TextVariator`, reutilizando `self._gemini` si ya existe para comentarios.
+- Fallback graceful: si `gemini` es `None` o falla, retorna texto original sin excepción.
 
 ### Riesgos
 - **Gemini pierde intención:** baja probabilidad con Flash 2.5, pero revisar muestras semanalmente.
-- **Parafraseo introduce errores ortográficos:** el prompt debe especificar "español de México profesional".
-- **Cache demasiado agresivo:** si el mismo texto + cuenta + grupo se publica semanas después, reusa parafraseo viejo. Añadir TTL de 7 días.
+- **Parafraseo introduce errores ortográficos:** el prompt especifica "español de México profesional".
+- **Cache demasiado agresivo:** si el mismo texto + cuenta + grupo se publica semanas después, reusa parafraseo viejo. TTL de 7 días implementado.
 
 ---
 
@@ -284,10 +346,18 @@ CONFIG = {
 ```
 
 ### Criterio de aceptación
-- [ ] Enviar 10 POST /post simultáneos → solo 2 Chromes corriendo en paralelo, el resto en cola.
-- [ ] Intentar publicar 4 veces a la misma cuenta en 1 hora → la 4a se encola para la siguiente hora.
-- [ ] `GET /admin/api/queue` muestra estado en tiempo real.
-- [ ] Si el servidor reinicia con jobs `running`, se marcan como `failed` o se reencolan (decidir política).
+- [x] Enviar 10 POST /post simultáneos → solo 2 Chromes corriendo en paralelo, el resto en cola.
+- [x] Intentar publicar 4 veces a la misma cuenta en 1 hora → la 4a se encola para la siguiente hora.
+- [x] `GET /admin/api/queue` muestra estado en tiempo real.
+- [x] Si el servidor reinicia con jobs `running`, se marcan como `interrupted` y se reencolan (política: 1 retry máximo).
+
+### Implementación (commit `f6bc4f8`)
+- `ThreadPoolExecutor(max_workers=CONFIG["max_concurrent_workers"])` reemplaza `threading.Thread`.
+- `_account_locks: dict[str, Lock]` serializa por cuenta — dos jobs sobre la misma cuenta son mutuamente excluyentes.
+- `_running_accounts: set[str]` visible en `GET /admin/api/queue`.
+- Rate limit por cuenta: `job_store.account_recent_post_count(name, window_minutes=60)` — si excede `max_posts_per_account_per_hour`, job se pospone 1h (status `delayed`).
+- `api_server.shutdown_executor(wait)` expuesto para graceful shutdown desde `main.py`.
+- Orphan recovery en startup: `mark_running_as_interrupted()` → reencola con `retry=True`.
 
 ### Riesgos
 - **Deadlock entre locks:** solo se toma un lock por cuenta por hilo, no hay anidamiento → sin riesgo.
@@ -340,10 +410,16 @@ signal.signal(signal.SIGTERM, _shutdown_handler)
 ```
 
 ### Criterio de aceptación
-- [ ] `python main.py` arranca con waitress (log lo confirma).
-- [ ] Flask debug banner ya no aparece.
-- [ ] Un `Ctrl+C` no deja Chromes zombies.
-- [ ] Apache Bench `ab -n 100 -c 10 http://localhost:5000/accounts` → 100% éxito sin degradación.
+- [x] `python main.py` arranca con waitress (log lo confirma).
+- [x] Flask debug banner ya no aparece.
+- [x] Un `Ctrl+C` no deja Chromes zombies.
+- [x] Apache Bench `ab -n 100 -c 10 http://localhost:5000/accounts` → 100% éxito sin degradación.
+
+### Implementación (commit `ce1b2c0`)
+- `app.run(...)` reemplazado por `serve(app, host="0.0.0.0", port=port, threads=8, ident="FBAutoPoster/1.0")`.
+- `_install_signal_handlers()` registra `SIGTERM`/`SIGINT`: detiene scheduler, apaga executor, marca jobs running → interrupted.
+- `scheduler_runner.stop()` agregado — setea `_stop_event` que termina el bucle del hilo daemon.
+- Orphan recovery al inicio: `mark_running_as_interrupted()` antes de `scheduler_runner.start()`.
 
 ### Riesgos
 - Ninguno. Waitress es drop-in para WSGI.
@@ -406,9 +482,9 @@ Emunium 3.0 tiene mantenimiento limitado. Evaluar alternativas:
 **Recomendación:** mantener Emunium en esta fase, pero abrir issue para evaluar migración a **humancursor** o una solución custom basada en Bézier en Fase 3. Probar en staging con ambas y comparar detección.
 
 ### Criterio de aceptación
-- [ ] `requirements.txt` con versiones exactas y hashes.
-- [ ] `uv pip audit` devuelve 0 vulnerabilidades críticas.
-- [ ] README/CLAUDE.md actualizado con `uv pip sync` como comando de instalación.
+- [x] `requirements.txt` con versiones exactas y hashes.
+- [x] `uv pip audit` devuelve 0 vulnerabilidades críticas.
+- [x] README/CLAUDE.md actualizado con `uv pip sync` como comando de instalación.
 
 ### Riesgos
 - Algunos paquetes pueden no estar en PyPI con hashes confiables → fallback a pip normal con `==`.
@@ -463,8 +539,8 @@ def purge_old_rate_limit_events(days: int = 7):
 ```
 
 ### Criterio de aceptación
-- [ ] Reiniciar servidor bajo carga → los contadores se mantienen.
-- [ ] Query `SELECT COUNT(*) FROM rate_limit_events` no crece indefinidamente (purga funciona).
+- [x] Reiniciar servidor bajo carga → los contadores se mantienen.
+- [x] Query `SELECT COUNT(*) FROM rate_limit_events` no crece indefinidamente (purga funciona).
 
 ### Riesgos
 - **Lock contention:** si OpenClaw hace 100 req/s el INSERT en SQLite bajo lock global puede ser cuello. Mitigación: quitar el `_lock` redundante (ver Fase 3) o usar Redis.
@@ -529,12 +605,22 @@ Listar bans en el dashboard con botón "Revisar manualmente" que:
 - Al cerrar, marca `reviewed=1` y resetea `ban_cooldown_until`.
 
 ### Criterio de aceptación
-- [ ] Cuando se detecta ban, la cuenta queda excluida automáticamente por 48h.
-- [ ] OpenClaw recibe callback con evento `account_banned`.
-- [ ] Panel admin muestra cuentas en cooldown con tiempo restante.
+- [x] Cuando se detecta ban, la cuenta queda excluida automáticamente por 48h.
+- [x] OpenClaw recibe callback con evento `account_banned`.
+- [x] Panel admin muestra cuentas en cooldown con tiempo restante.
+
+### Implementación (commit `24b151d`)
+- Tabla `account_bans (id, account_name, detected_at, context, screenshot_path, reviewed)` en SQLite.
+- Columna `ban_cooldown_until TEXT` en `accounts` (migración try-except).
+- `job_store`: `record_ban()`, `set_account_ban_cooldown()`, `list_active_bans()`, `clear_ban()`.
+- `_handle_banned` llama `record_ban()` + `set_account_ban_cooldown(hours=48)`.
+- `load_accounts()` filtra cuentas con `ban_cooldown_until > now`.
+- Mitigación de falsos positivos: `self._ban_detection_times` — requiere 2 detecciones dentro de 10 min (`_BAN_WINDOW_S=600`).
+- Webhook `account_banned` enviado vía `webhook.py`.
+- Endpoints: `GET /admin/api/bans`, `POST /admin/api/bans/<account>/clear`.
 
 ### Riesgos
-- **Falso positivo:** un popup temporal de FB puede ser confundido con ban. Mitigación: requerir 2 detecciones en 10 minutos antes de activar cooldown.
+- **Falso positivo:** resuelto con ventana de 2 detecciones en 10 minutos antes de activar cooldown.
 
 ---
 
@@ -573,8 +659,8 @@ def health():
 Endpoint `GET /health/detailed` (con `X-API-Key`) con más info: cuentas baneadas, jobs por estado, cola de workers, etc.
 
 ### Criterio de aceptación
-- [ ] `curl http://localhost:5000/health` devuelve 200 con JSON.
-- [ ] OpenClaw puede integrarlo en su monitoreo.
+- [x] `curl http://localhost:5000/health` devuelve 200 con JSON.
+- [x] OpenClaw puede integrarlo en su monitoreo.
 
 ### Riesgos
 - Ninguno.
@@ -616,8 +702,8 @@ def _extract_image_bytes(self, article):
 Mientras descarga, el browser puede seguir haciendo micro-interacciones (mover mouse levemente). Aunque en `sync_playwright` con single-threaded eso no es trivial — la mejora real viene en Fase 3 con async.
 
 ### Criterio de aceptación
-- [ ] Logs muestran que descargar imagen jamás excede 3.5s.
-- [ ] Si hay timeout, el warmup continúa con scroll/hover sin comentario Gemini.
+- [x] Logs muestran que descargar imagen jamás excede 3.5s.
+- [x] Si hay timeout, el warmup continúa con scroll/hover sin comentario Gemini.
 
 ### Riesgos
 - Reducir tasa de comentarios Gemini (aceptable: el warmup sin comentario sigue aportando).

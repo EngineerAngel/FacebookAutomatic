@@ -14,6 +14,7 @@ Base de datos: jobs.db (local, gitignored, nunca expuesto por API)
 import json
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -104,6 +105,20 @@ def init_db() -> None:
                 reviewed        INTEGER NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS rate_limit_events (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip       TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                ts       REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS text_variations (
+                cache_key     TEXT PRIMARY KEY,
+                original_hash TEXT NOT NULL,
+                variated      TEXT NOT NULL,
+                created_at    REAL NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_jobs_scheduled ON jobs(scheduled_for)
                 WHERE type = 'scheduled';
@@ -112,6 +127,8 @@ def init_db() -> None:
                 ON gemini_usage(account_name, used_at);
             CREATE INDEX IF NOT EXISTS idx_account_bans_account
                 ON account_bans(account_name, detected_at);
+            CREATE INDEX IF NOT EXISTS idx_ratelimit_lookup
+                ON rate_limit_events(ip, endpoint, ts);
         """)
 
         # Migraciones seguras — no fallan si la columna ya existe
@@ -122,6 +139,8 @@ def init_db() -> None:
             "ALTER TABLE accounts ADD COLUMN timezone TEXT NOT NULL DEFAULT 'America/Mexico_City'",
             "ALTER TABLE accounts ADD COLUMN active_hours TEXT NOT NULL DEFAULT '[7, 23]'",
             "ALTER TABLE accounts ADD COLUMN ban_cooldown_until TEXT",
+            "ALTER TABLE accounts ADD COLUMN fingerprint_json TEXT",
+            "ALTER TABLE accounts ADD COLUMN password_enc TEXT",
         ]:
             try:
                 conn.execute(stmt)
@@ -171,7 +190,7 @@ def list_accounts_full() -> list[dict]:
     with _lock, _connect() as conn:
         rows = conn.execute(
             """SELECT name, email, groups, timezone, active_hours,
-                      ban_cooldown_until,
+                      ban_cooldown_until, fingerprint_json, password_enc,
                       created_at, last_login_at, last_published_at
                FROM accounts WHERE is_active=1
                ORDER BY name ASC"""
@@ -179,18 +198,47 @@ def list_accounts_full() -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def create_account(name: str, email: str, groups: list[str]) -> None:
+def create_account(name: str, email: str, groups: list[str],
+                   fingerprint_json: str | None = None) -> None:
     """Crea una cuenta nueva o reactiva una eliminada."""
     now = datetime.now().isoformat()
     with _lock, _connect() as conn:
         conn.execute(
-            """INSERT INTO accounts (name, email, groups, created_at, is_active)
-               VALUES (?, ?, ?, ?, 1)
+            """INSERT INTO accounts (name, email, groups, fingerprint_json, created_at, is_active)
+               VALUES (?, ?, ?, ?, ?, 1)
                ON CONFLICT(name) DO UPDATE SET
-                   email    = excluded.email,
-                   groups   = excluded.groups,
-                   is_active = 1""",
-            (name, email, json.dumps(groups), now),
+                   email            = excluded.email,
+                   groups           = excluded.groups,
+                   fingerprint_json = COALESCE(excluded.fingerprint_json, accounts.fingerprint_json),
+                   is_active        = 1""",
+            (name, email, json.dumps(groups), fingerprint_json, now),
+        )
+
+
+def save_fingerprint(account_name: str, fingerprint_json: str) -> None:
+    """Persiste el fingerprint asignado a una cuenta."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE accounts SET fingerprint_json=? WHERE name=?",
+            (fingerprint_json, account_name),
+        )
+
+
+def set_account_password(account_name: str, password_enc: str) -> None:
+    """Guarda la contraseña cifrada con Fernet para una cuenta."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE accounts SET password_enc=? WHERE name=?",
+            (password_enc, account_name),
+        )
+
+
+def clear_account_password(account_name: str) -> None:
+    """Elimina la contraseña individual — la cuenta usará FB_PASSWORD global."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE accounts SET password_enc=NULL WHERE name=?",
+            (account_name,),
         )
 
 
@@ -206,26 +254,21 @@ def update_account(name: str, email: str, groups: list[str]) -> bool:
 
 def rename_account(old_name: str, new_name: str, email: str, groups: list[str]) -> bool:
     """
-    Renombra una cuenta cambiando su PK. Copia timestamps, elimina la vieja.
+    Renombra una cuenta actualizando su PK en una sola transacción.
+    Usa UPDATE en lugar de INSERT+DELETE para preservar todos los campos
+    (incluyendo password_enc, fingerprint_json, ban_cooldown_until, etc.).
     Retorna True si old_name existía.
     """
     with _lock, _connect() as conn:
-        row = conn.execute(
-            "SELECT created_at, last_login_at, last_published_at FROM accounts WHERE name=? AND is_active=1",
-            (old_name,),
+        exists = conn.execute(
+            "SELECT 1 FROM accounts WHERE name=? AND is_active=1", (old_name,)
         ).fetchone()
-        if not row:
+        if not exists:
             return False
         conn.execute(
-            """INSERT INTO accounts (name, email, groups, created_at, last_login_at, last_published_at, is_active)
-               VALUES (?, ?, ?, ?, ?, ?, 1)
-               ON CONFLICT(name) DO UPDATE SET
-                   email=excluded.email, groups=excluded.groups, is_active=1""",
-            (new_name, email, json.dumps(groups), row["created_at"],
-             row["last_login_at"], row["last_published_at"]),
+            "UPDATE accounts SET name=?, email=?, groups=? WHERE name=?",
+            (new_name, email, json.dumps(groups), old_name),
         )
-        conn.execute("UPDATE accounts SET is_active=0 WHERE name=?", (old_name,))
-        # Actualizar historial de logins para que refleje el nuevo nombre
         conn.execute(
             "UPDATE login_events SET account_name=? WHERE account_name=?",
             (new_name, old_name),
@@ -518,6 +561,159 @@ def cancel_job(job_id: str) -> bool:
             (job_id,),
         )
         return cursor.rowcount > 0
+
+
+def mark_running_as_interrupted() -> int:
+    """Marca todos los jobs en estado 'running' como 'interrupted'.
+
+    Usado en el arranque del servidor (crash/shutdown previo dejó jobs huérfanos)
+    y durante graceful shutdown. Retorna el número de filas afectadas.
+    """
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "UPDATE jobs SET status='interrupted', finished_at=? WHERE status='running'",
+            (now,),
+        )
+        return int(cur.rowcount)
+
+
+# ---------------------------------------------------------------------------
+# Métricas para healthcheck
+# ---------------------------------------------------------------------------
+def count_pending_jobs() -> int:
+    """Número de jobs en cola (pending o running)."""
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE status IN ('pending','running')"
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+
+def count_active_accounts() -> int:
+    """Cuentas activas que NO están en cooldown de ban."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) AS n FROM accounts
+               WHERE is_active=1
+                 AND (ban_cooldown_until IS NULL OR ban_cooldown_until <= ?)""",
+            (now,),
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+
+def count_jobs_by_status() -> dict[str, int]:
+    """Distribución de jobs por estado (para healthcheck detallado)."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status"
+        ).fetchall()
+        return {r["status"]: int(r["n"]) for r in rows}
+
+
+def account_recent_post_count(account_name: str, window_minutes: int = 60) -> int:
+    """Cuenta publicaciones exitosas de una cuenta en los últimos N minutos.
+
+    Usado por el rate limiter por cuenta (Fase 2.3) — previene ráfagas que
+    disparan soft-bans.
+    """
+    from datetime import timedelta
+    cutoff = (datetime.now() - timedelta(minutes=window_minutes)).isoformat()
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) AS n
+               FROM job_results jr JOIN jobs j ON jr.job_id = j.id
+               WHERE jr.account_name = ?
+                 AND jr.success = 1
+                 AND jr.account_name != '__system__'
+                 AND (j.finished_at IS NOT NULL AND j.finished_at >= ?)""",
+            (account_name, cutoff),
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter persistente (SQLite)
+# ---------------------------------------------------------------------------
+def is_rate_limited(ip: str, endpoint: str, limit: int, window_s: int) -> bool:
+    """Retorna True si ip+endpoint excedió `limit` hits en los últimos window_s.
+
+    Registra el hit actual si no está limitado, en operación atómica bajo _lock.
+    Sobrevive a reinicios del servidor — los hits viejos se purgan en la misma
+    llamada.
+    """
+    now = time.time()
+    cutoff = now - window_s
+    with _lock, _connect() as conn:
+        # Purgar eventos viejos para este (ip, endpoint)
+        conn.execute(
+            "DELETE FROM rate_limit_events WHERE ip=? AND endpoint=? AND ts < ?",
+            (ip, endpoint, cutoff),
+        )
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM rate_limit_events WHERE ip=? AND endpoint=? AND ts >= ?",
+            (ip, endpoint, cutoff),
+        ).fetchone()
+        count = int(row["n"]) if row else 0
+        if count >= limit:
+            return True
+        conn.execute(
+            "INSERT INTO rate_limit_events (ip, endpoint, ts) VALUES (?, ?, ?)",
+            (ip, endpoint, now),
+        )
+        return False
+
+
+def purge_old_rate_limit_events(days: int = 7) -> int:
+    """Elimina eventos más viejos que N días. Retorna filas eliminadas."""
+    cutoff = time.time() - days * 86400
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM rate_limit_events WHERE ts < ?",
+            (cutoff,),
+        )
+        return int(cur.rowcount)
+
+
+# ---------------------------------------------------------------------------
+# Text variations cache (Fase 2.2)
+# ---------------------------------------------------------------------------
+def get_text_variation(cache_key: str, ttl_seconds: int) -> str | None:
+    """Retorna el parafraseo cacheado si no ha expirado, None si miss/expirado."""
+    cutoff = time.time() - ttl_seconds
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """SELECT variated FROM text_variations
+               WHERE cache_key=? AND created_at >= ?""",
+            (cache_key, cutoff),
+        ).fetchone()
+        return row["variated"] if row else None
+
+
+def save_text_variation(cache_key: str, original_hash: str, variated: str) -> None:
+    """Guarda (o reemplaza) una variación cacheada."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO text_variations (cache_key, original_hash, variated, created_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(cache_key) DO UPDATE SET
+                   original_hash = excluded.original_hash,
+                   variated      = excluded.variated,
+                   created_at    = excluded.created_at""",
+            (cache_key, original_hash, variated, time.time()),
+        )
+
+
+def purge_old_text_variations(days: int = 7) -> int:
+    """Elimina variaciones más viejas que N días. Retorna filas eliminadas."""
+    cutoff = time.time() - days * 86400
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM text_variations WHERE created_at < ?",
+            (cutoff,),
+        )
+        return int(cur.rowcount)
 
 
 # ---------------------------------------------------------------------------

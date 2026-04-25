@@ -17,3 +17,6 @@ requests~=2.31
 
 # Google Gemini SDK
 google-genai~=0.3
+
+# Cifrado de contrasenias individuales (Fernet / AES-128-CBC + HMAC)
+cryptography~=42.0

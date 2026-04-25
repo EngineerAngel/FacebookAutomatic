@@ -8,6 +8,7 @@ on the first run before the DB is populated.
 
 import json
 import os
+import random
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -48,10 +49,17 @@ CONFIG: dict = {
     "emunium_enabled": True,              # False = solo Patchright (sin mouse/keyboard OS-level)
     "implicit_wait": 10,
     "max_retries": 3,
-    "text_variation_mode": True,
+    "text_variation_mode": "gemini",  # "gemini" | "zero_width" | "off"
 
     "execution_mode": os.getenv("EXECUTION_MODE", "sequential").strip().lower(),
     "api_port": int(os.getenv("API_PORT", "5000")),
+    # Pool de workers (Fase 2.3): cuántos jobs (cada uno con potencialmente
+    # varias cuentas) corren en paralelo. Más de 2-3 Chromes simultáneos
+    # desde la misma IP/host aumenta detección.
+    "max_concurrent_workers": int(os.getenv("MAX_CONCURRENT_WORKERS", "2")),
+    # Rate limit por cuenta (protege contra ráfagas que disparan soft-bans)
+    "max_posts_per_account_per_hour": 3,
+    "max_posts_per_account_per_day": 15,
     # Idle aleatorio entre publicaciones (simula distracción humana)
     "idle_probability": 0.20,
     "idle_min_seconds": 5,
@@ -99,6 +107,7 @@ class AccountConfig:
     groups: list[str] = field(default_factory=list)
     timezone: str = "America/Mexico_City"
     active_hours: tuple[int, int] = (7, 23)
+    fingerprint: dict = field(default_factory=dict)
     log_file: str = ""
     screenshots_dir: str = ""
 
@@ -108,6 +117,19 @@ class AccountConfig:
             self.log_file = str(base / "logs" / f"{self.name}.log")
         if not self.screenshots_dir:
             self.screenshots_dir = str(base / "screenshots" / self.name)
+
+
+def load_fingerprints() -> list[dict]:
+    """Carga el catálogo de fingerprints desde fingerprints.json."""
+    path = Path(__file__).resolve().parent / "fingerprints.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def pick_fingerprint(taken_ids: list[str]) -> dict:
+    """Elige un fingerprint no asignado aún. Si todos están tomados, reutiliza al azar."""
+    catalog = load_fingerprints()
+    available = [fp for fp in catalog if fp["id"] not in taken_ids]
+    return random.choice(available if available else catalog)
 
 
 def is_account_hour_allowed(account: AccountConfig) -> bool:
@@ -139,6 +161,7 @@ def load_accounts() -> list[AccountConfig]:
         if rows:
             now_iso = datetime.now().isoformat()
             accounts = []
+            taken_ids: list[str] = []
             for r in rows:
                 groups = json.loads(r["groups"]) if r.get("groups") else []
                 if not groups:
@@ -148,20 +171,49 @@ def load_accounts() -> list[AccountConfig]:
                     continue  # Cuenta en cooldown post-ban — saltar
                 active_hours_raw = r.get("active_hours") or "[7, 23]"
                 active_hours = tuple(json.loads(active_hours_raw))
+
+                # Fingerprint per-account (Fase 1.3)
+                fp_raw = r.get("fingerprint_json")
+                if fp_raw:
+                    fingerprint = json.loads(fp_raw)
+                else:
+                    fingerprint = pick_fingerprint(taken_ids)
+                    job_store.save_fingerprint(r["name"], json.dumps(fingerprint))
+                taken_ids.append(fingerprint.get("id", ""))
+
+                # Contraseña individual cifrada (Fase 1.2)
+                password = global_password
+                password_enc = r.get("password_enc")
+                if password_enc:
+                    try:
+                        from crypto import decrypt_password
+                        password = decrypt_password(password_enc)
+                    except Exception:
+                        pass  # fallback a contraseña global si falla descifrado
+
                 accounts.append(
                     AccountConfig(
                         name=r["name"],
                         email=r["email"],
-                        password=global_password,
+                        password=password,
                         groups=groups,
                         timezone=r.get("timezone") or "America/Mexico_City",
                         active_hours=active_hours,
+                        fingerprint=fingerprint,
                     )
                 )
             if accounts:
                 return accounts
-    except Exception:
-        pass  # BD no existe aún → fallback a .env
+    except (FileNotFoundError, ImportError):
+        pass  # BD genuinamente no existe aún — fallback a .env esperado
+    except Exception as _db_exc:
+        # [FIX P0-2] Error inesperado (corrupción, disco lleno, etc.)
+        # Logea visible antes de hacer fallback — no silencia problemas reales
+        import logging as _lg
+        _lg.getLogger(__name__).error(
+            "[config] Error inesperado leyendo DB — fallback a .env. "
+            "Verificar integridad de jobs.db. Error: %s", _db_exc
+        )
 
     # --- Fallback: leer desde .env ------------------------------------------
     return _load_accounts_from_env(global_password)
