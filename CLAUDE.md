@@ -65,13 +65,28 @@ Scheduled jobs: POST /schedule → DB → scheduler_runner (every 30s) → same 
 
 | Table | Purpose |
 |-------|---------|
-| `accounts` | PK: name. Fields: email, groups (JSON), timezone, active_hours, fingerprint_json, is_active |
+| `accounts` | PK: name. Fields: email (login ID: email or phone), groups (JSON), timezone, active_hours, fingerprint_json, password_enc, is_active |
 | `account_cookies` | PK: email. Serialized session cookies (plaintext JSON — see known issues) |
 | `jobs` | Queue: immediate + scheduled. Status: pending/running/done/failed/cancelled |
 | `job_results` | Per-account, per-group success/failure with group_tag snapshot |
 | `login_events` | Login audit trail |
 | `gemini_usage` | Daily Gemini API quota tracking per account |
 | `group_tags` | Human-readable emoji-safe labels per group ID |
+
+### Login Identifiers (Email or Phone)
+
+Cada cuenta de Facebook se autentica usando **uno** de estos identificadores:
+- **Email**: `user@dominio.com` (valida el `@` y TLD)
+- **Teléfono**: `+521234567890` o `521234567890` (7–15 dígitos, `+` opcional, internacional)
+
+El campo `email` en la BD almacena **indistintamente** email o teléfono. Facebook's login form `input[name='email']` acepta ambos.
+
+**Configuración (tres formas):**
+1. **Panel admin** (`/admin`): campo "Email o teléfono" en el modal de cuentas (recomendado)
+2. **`.env` fallback**: variables `{PREFIX}_EMAIL` o `{PREFIX}_PHONE` en el primer arranque
+3. **BD directo**: `UPDATE accounts SET email='...' WHERE name=...`
+
+Cookies se asocian por identificador (se buscan en `account_cookies.email` usando cualquiera de los dos formatos).
 
 ## Authentication & Security
 
@@ -80,7 +95,7 @@ Scheduled jobs: POST /schedule → DB → scheduler_runner (every 30s) → same 
 | OpenClaw API | `X-API-Key` header, `secrets.compare_digest()` |
 | Admin panel | Flask session cookie, signed with `ADMIN_KEY` |
 | Rate limiting | 10 req/60s per IP (in-memory, resets on restart) |
-| Input validation | Account names `[a-z0-9_]{1,30}`, emails, groups digits-only |
+| Input validation | Account names `[a-z0-9_]{1,30}`, login IDs (email or phone `+?[0-9]{7,15}`), groups digits-only |
 | Image uploads | Extension whitelist, MIME check, UUID rename, path traversal prevention |
 | SQL injection | All queries use `?` parameterized statements |
 
@@ -122,7 +137,7 @@ Hour guard: accounts have `active_hours=(7,23)` + `timezone="UTC"` in DB. `Accou
 ## Account Loading Priority
 
 1. **SQLite DB** (`job_store.list_accounts_full()`) — managed via admin panel
-2. **`.env` fallback** — first run before DB is populated (`ACCOUNT_NAMES`, `{PREFIX}_EMAIL`, `{PREFIX}_GROUPS`)
+2. **`.env` fallback** — first run before DB is populated (`ACCOUNT_NAMES`, `{PREFIX}_EMAIL` o `{PREFIX}_PHONE`, `{PREFIX}_GROUPS`)
 
 Shared password: `FB_PASSWORD` in `.env` used for all accounts (see known issues).
 
