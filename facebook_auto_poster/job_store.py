@@ -95,12 +95,23 @@ def init_db() -> None:
                 success      INTEGER NOT NULL DEFAULT 1
             );
 
+            CREATE TABLE IF NOT EXISTS account_bans (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_name    TEXT NOT NULL,
+                detected_at     TEXT NOT NULL,
+                context         TEXT,
+                screenshot_path TEXT,
+                reviewed        INTEGER NOT NULL DEFAULT 0
+            );
+
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_jobs_scheduled ON jobs(scheduled_for)
                 WHERE type = 'scheduled';
             CREATE INDEX IF NOT EXISTS idx_login_events_account ON login_events(account_name);
             CREATE INDEX IF NOT EXISTS idx_gemini_usage_account_date
                 ON gemini_usage(account_name, used_at);
+            CREATE INDEX IF NOT EXISTS idx_account_bans_account
+                ON account_bans(account_name, detected_at);
         """)
 
         # Migraciones seguras — no fallan si la columna ya existe
@@ -110,6 +121,7 @@ def init_db() -> None:
             "ALTER TABLE accounts ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE accounts ADD COLUMN timezone TEXT NOT NULL DEFAULT 'America/Mexico_City'",
             "ALTER TABLE accounts ADD COLUMN active_hours TEXT NOT NULL DEFAULT '[7, 23]'",
+            "ALTER TABLE accounts ADD COLUMN ban_cooldown_until TEXT",
         ]:
             try:
                 conn.execute(stmt)
@@ -159,6 +171,7 @@ def list_accounts_full() -> list[dict]:
     with _lock, _connect() as conn:
         rows = conn.execute(
             """SELECT name, email, groups, timezone, active_hours,
+                      ban_cooldown_until,
                       created_at, last_login_at, last_published_at
                FROM accounts WHERE is_active=1
                ORDER BY name ASC"""
@@ -258,6 +271,91 @@ def get_recent_logins(limit: int = 50) -> list[dict]:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Bans — detección de soft-bans y cooldown
+# ---------------------------------------------------------------------------
+def record_ban(
+    account_name: str,
+    context: str,
+    screenshot_path: str | None = None,
+) -> int:
+    """Registra un evento de ban. Retorna el id generado."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO account_bans
+               (account_name, detected_at, context, screenshot_path)
+               VALUES (?, ?, ?, ?)""",
+            (account_name, now, context, screenshot_path),
+        )
+        return int(cur.lastrowid)
+
+
+def set_account_ban_cooldown(account_name: str, hours: int) -> None:
+    """Marca la cuenta en cooldown hasta now + hours."""
+    from datetime import timedelta
+    until = (datetime.now() + timedelta(hours=hours)).isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE accounts SET ban_cooldown_until=? WHERE name=?",
+            (until, account_name),
+        )
+
+
+def clear_ban(account_name: str) -> bool:
+    """Levanta el cooldown y marca bans como reviewed. Retorna True si existía."""
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "UPDATE accounts SET ban_cooldown_until=NULL WHERE name=?",
+            (account_name,),
+        )
+        conn.execute(
+            "UPDATE account_bans SET reviewed=1 WHERE account_name=? AND reviewed=0",
+            (account_name,),
+        )
+        return cur.rowcount > 0
+
+
+def list_active_bans() -> list[dict]:
+    """Lista cuentas actualmente en cooldown con tiempo restante."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """SELECT name, ban_cooldown_until FROM accounts
+               WHERE ban_cooldown_until IS NOT NULL
+                 AND ban_cooldown_until > ?
+               ORDER BY ban_cooldown_until ASC""",
+            (now,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_recent_bans(limit: int = 50) -> list[dict]:
+    """Lista los últimos N eventos de ban (incluye ya reviewed)."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """SELECT id, account_name, detected_at, context,
+                      screenshot_path, reviewed
+               FROM account_bans
+               ORDER BY detected_at DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def is_account_in_cooldown(account_name: str) -> bool:
+    """True si la cuenta tiene ban_cooldown_until > now."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """SELECT 1 FROM accounts
+               WHERE name=? AND ban_cooldown_until IS NOT NULL
+                 AND ban_cooldown_until > ?""",
+            (account_name, now),
+        ).fetchone()
+        return row is not None
 
 
 # ---------------------------------------------------------------------------

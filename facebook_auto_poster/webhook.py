@@ -98,3 +98,27 @@ def fire(
         daemon=True,
         name=f"webhook-{job_id}",
     ).start()
+
+
+def fire_account_banned(
+    url: str | None,
+    account_name: str,
+    context: str,
+    cooldown_hours: int,
+) -> None:
+    """Notifica a OpenClaw que una cuenta entró en cooldown por soft-ban."""
+    if not url:
+        return
+    payload = {
+        "event": "account_banned",
+        "account": account_name,
+        "context": context,
+        "cooldown_hours": cooldown_hours,
+        "detected_at": datetime.now().isoformat(),
+    }
+    threading.Thread(
+        target=_fire_with_retry,
+        args=(url, payload),
+        daemon=True,
+        name=f"webhook-ban-{account_name}",
+    ).start()

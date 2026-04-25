@@ -36,6 +36,7 @@ except ImportError:
 
 from config import AccountConfig
 import job_store
+import webhook
 from gemini_commenter import GeminiCommenter
 from human_browsing import HumanBrowsing
 
@@ -72,6 +73,16 @@ def _vary_text(text: str, account_name: str) -> str:
 # (title bar + tab strip + address bar). Ajustable si hace falta.
 _CHROME_UI_Y_OFFSET = 85
 
+# ---------------------------------------------------------------------------
+# Detección de bans — mitigación de falsos positivos
+# ---------------------------------------------------------------------------
+# Ventana en segundos para agrupar detecciones. 2 detecciones dentro de esta
+# ventana activan el cooldown; una aislada solo se loguea (puede ser popup
+# temporal de Facebook confundido con ban).
+_BAN_WINDOW_S = 600  # 10 min
+# Duración del cooldown tras confirmación de ban.
+_BAN_COOLDOWN_HOURS = 48
+
 
 # ---------------------------------------------------------------------------
 # FacebookPoster
@@ -81,9 +92,15 @@ class FacebookPoster:
 
     _TYPO_ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
-    def __init__(self, account: AccountConfig, config: dict) -> None:
+    def __init__(
+        self,
+        account: AccountConfig,
+        config: dict,
+        callback_url: str | None = None,
+    ) -> None:
         self.account = account
         self.config = config
+        self._callback_url = callback_url
 
         # -- per-account logger ------------------------------------------
         self.logger = logging.getLogger(f"poster.{account.name}")
@@ -110,6 +127,9 @@ class FacebookPoster:
         # -- Runtime flags (per-account scope) ---------------------------
         self._banned: bool = False
         self._publish_count: int = 0
+        # Timestamps de detecciones recientes para mitigar falsos positivos
+        # (requiere 2 detecciones dentro de _BAN_WINDOW_S para activar cooldown)
+        self._ban_detection_times: list[float] = []
 
         # -- Window offsets for Emunium screen-coord translation ---------
         pos_x, pos_y = config.get("browser_window_position", (0, 0))
@@ -595,14 +615,61 @@ class FacebookPoster:
         return "clear"
 
     def _handle_banned(self, context: str) -> None:
-        """Registra y toma screenshot cuando se detecta un soft-ban."""
+        """Registra soft-ban, toma screenshot y activa cooldown tras 2 detecciones.
+
+        Una detección aislada puede ser un popup temporal de Facebook. Solo
+        cuando hay 2 detecciones dentro de _BAN_WINDOW_S se considera ban
+        confirmado y se persiste + activa cooldown.
+        """
         self.logger.critical(
             "[BANNED] Soft-ban detectado en %s para cuenta %s — URL: %s",
             context, self.account.name, self.page.url,
         )
         print(f"\n[!] SOFT-BAN detectado en cuenta {self.account.name} "
               f"({context}) — abortando retries.\n")
-        self._screenshot(f"banned_{self.account.name}.png")
+
+        screenshot_name = f"banned_{self.account.name}_{int(time.time())}.png"
+        self._screenshot(screenshot_name)
+        screenshot_path = os.path.join(self.account.screenshots_dir, screenshot_name)
+
+        # Purgar detecciones viejas y agregar la actual
+        now = time.time()
+        self._ban_detection_times = [
+            t for t in self._ban_detection_times if now - t < _BAN_WINDOW_S
+        ]
+        self._ban_detection_times.append(now)
+
+        if len(self._ban_detection_times) < 2:
+            self.logger.warning(
+                "[BANNED] Primera detección en ventana de %ds — esperando confirmación "
+                "(posible falso positivo)", _BAN_WINDOW_S,
+            )
+            return
+
+        # Segunda detección en la ventana → confirmado
+        self.logger.critical(
+            "[BANNED] CONFIRMADO (%d detecciones en %ds) — activando cooldown %dh",
+            len(self._ban_detection_times), _BAN_WINDOW_S, _BAN_COOLDOWN_HOURS,
+        )
+        try:
+            job_store.record_ban(
+                account_name=self.account.name,
+                context=context,
+                screenshot_path=screenshot_path,
+            )
+            job_store.set_account_ban_cooldown(
+                self.account.name, hours=_BAN_COOLDOWN_HOURS,
+            )
+        except Exception:
+            self.logger.error("[BANNED] Error persistiendo ban en DB", exc_info=True)
+
+        # Notificar a OpenClaw (fire-and-forget, no bloquea)
+        webhook.fire_account_banned(
+            url=self._callback_url,
+            account_name=self.account.name,
+            context=context,
+            cooldown_hours=_BAN_COOLDOWN_HOURS,
+        )
 
     def _wait_for_manual_resolution(self) -> bool:
         """Pausa hasta que el operador resuelva el CAPTCHA/checkpoint manualmente.

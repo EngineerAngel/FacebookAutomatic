@@ -137,11 +137,15 @@ def load_accounts() -> list[AccountConfig]:
         import job_store
         rows = job_store.list_accounts_full()
         if rows:
+            now_iso = datetime.now().isoformat()
             accounts = []
             for r in rows:
                 groups = json.loads(r["groups"]) if r.get("groups") else []
                 if not groups:
                     continue
+                cooldown = r.get("ban_cooldown_until")
+                if cooldown and cooldown > now_iso:
+                    continue  # Cuenta en cooldown post-ban — saltar
                 active_hours_raw = r.get("active_hours") or "[7, 23]"
                 active_hours = tuple(json.loads(active_hours_raw))
                 accounts.append(

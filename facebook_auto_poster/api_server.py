@@ -279,7 +279,10 @@ def _run_job(job_id: str, accounts, text: str,
              image_path: str | None, callback_url: str | None) -> None:
     job_store.mark_running(job_id)
     try:
-        mgr = AccountManager(accounts, CONFIG, text, image_path=image_path)
+        mgr = AccountManager(
+            accounts, CONFIG, text,
+            image_path=image_path, callback_url=callback_url,
+        )
         results = mgr.run()
         mgr.print_summary(results)
         job_store.mark_done(job_id, results)
@@ -575,6 +578,27 @@ def admin_history():
 def admin_jobs():
     limit = min(int(request.args.get("limit", "50")), 200)
     return jsonify(job_store.get_recent_jobs(limit))
+
+
+@app.get("/admin/api/bans")
+@admin_required
+def admin_list_bans():
+    """Lista cuentas en cooldown y últimos eventos de ban."""
+    limit = min(int(request.args.get("limit", "50")), 200)
+    return jsonify({
+        "active_cooldowns": job_store.list_active_bans(),
+        "recent_events": job_store.list_recent_bans(limit),
+    })
+
+
+@app.post("/admin/api/bans/<name>/clear")
+@admin_required
+def admin_clear_ban(name: str):
+    """Levanta el cooldown de una cuenta y marca sus bans como reviewed."""
+    ok = job_store.clear_ban(name)
+    if not ok:
+        return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
+    return jsonify({"ok": True, "account": name})
 
 
 # ===========================================================================
