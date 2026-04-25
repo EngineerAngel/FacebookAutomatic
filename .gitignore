@@ -38,6 +38,7 @@ logs/
 screenshots/
 cookies/
 uploaded_images/
+browser_profiles/
 jobs.db
 jobs.db-wal
 jobs.db-shm

@@ -20,7 +20,6 @@ import time
 from pathlib import Path
 
 from patchright.sync_api import (
-    Browser,
     BrowserContext,
     Page,
     TimeoutError as PatchrightTimeout,
@@ -137,8 +136,12 @@ class FacebookPoster:
         self._window_y_offset = pos_y + _CHROME_UI_Y_OFFSET
 
         # -- Playwright lifecycle ----------------------------------------
+        # launch_persistent_context no expone Browser separado; self.browser
+        # se conserva como None por retrocompatibilidad con código legacy
+        # que solo lo usaba en close().
+        self.browser = None
         self._pw = sync_playwright().start()
-        self.browser, self.context, self.page = self._build_browser()
+        self.context, self.page = self._build_browser()
 
         # -- Emunium (standalone, opera en coords OS) --------------------
         self._em = None
@@ -177,7 +180,60 @@ class FacebookPoster:
     # ------------------------------------------------------------------ #
     # Browser setup
     # ------------------------------------------------------------------ #
-    def _build_browser(self) -> tuple[Browser, BrowserContext, Page]:
+    def _resolve_user_data_dir(self) -> Path:
+        """Resuelve el user_data_dir para esta cuenta. Maneja profiles corruptos.
+
+        Si existe un .lock file (dejado por un Chrome crasheado), renombra el
+        profile a <name>.corrupt.<ts> y crea uno nuevo. Esto previene que un
+        crash previo bloquee arranques futuros.
+        """
+        base = Path(__file__).resolve().parent / "browser_profiles"
+        base.mkdir(parents=True, exist_ok=True)
+        profile_dir = base / self.account.name
+        lock_file = profile_dir / ".lock"
+
+        if lock_file.exists():
+            corrupt_name = f"{self.account.name}.corrupt.{int(time.time())}"
+            corrupt_dir = base / corrupt_name
+            self.logger.warning(
+                "[Driver] Profile %s tiene .lock stale — renombrando a %s",
+                self.account.name, corrupt_name,
+            )
+            try:
+                profile_dir.rename(corrupt_dir)
+            except Exception:
+                self.logger.exception("[Driver] Error renombrando profile corrupto")
+
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        # Escribir lock file; se limpia en close()
+        try:
+            lock_file.touch(exist_ok=True)
+        except Exception:
+            pass
+        return profile_dir
+
+    def _migrate_cookies_if_needed(self, context: "BrowserContext", profile_dir: Path) -> None:
+        """Inyecta cookies de account_cookies en el context la primera vez.
+
+        Cuando el profile es nuevo (sin cookies), migra desde la tabla legacy
+        una sola vez. A partir de ahí el profile persiste cookies localmente.
+        """
+        marker = profile_dir / ".cookies_migrated"
+        if marker.exists():
+            return
+        try:
+            cookies = job_store.load_cookies(self.account.email)
+            if cookies:
+                context.add_cookies(cookies)
+                self.logger.info(
+                    "[Driver] Migradas %d cookies desde DB al profile persistente",
+                    len(cookies),
+                )
+            marker.touch()
+        except Exception:
+            self.logger.warning("[Driver] Falló migración de cookies", exc_info=True)
+
+    def _build_browser(self) -> tuple[BrowserContext, Page]:
         self.logger.info("[Driver] Construyendo browser Patchright para %s ...", self.account.name)
 
         w, h = self.config["browser_window_size"]
@@ -189,34 +245,44 @@ class FacebookPoster:
             f"--window-size={w},{h}",
             "--disable-notifications",
             "--lang=es",
+            "--disable-blink-features=AutomationControlled",
         ]
 
         if headless:
             self.logger.info("[Driver] Modo headless activado")
 
+        # Fingerprint genérico — Fase 1.3 lo reemplazará por per-account.
         user_agent = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
+            "Chrome/132.0.0.0 Safari/537.36"
         )
 
+        user_data_dir = self._resolve_user_data_dir()
+
         try:
-            browser = self._pw.chromium.launch(headless=headless, args=args)
+            context = self._pw.chromium.launch_persistent_context(
+                user_data_dir=str(user_data_dir),
+                headless=headless,
+                args=args,
+                user_agent=user_agent,
+                viewport={"width": w, "height": h},
+                locale="es-MX",
+                timezone_id=self.account.timezone,
+                color_scheme="light",
+            )
         except Exception:
             self.logger.error("[Driver] FALLO al lanzar Chromium parcheado", exc_info=True)
             raise
 
-        context = browser.new_context(
-            user_agent=user_agent,
-            viewport={"width": w, "height": h},
-            locale="es-ES",
-        )
         # Timeout por defecto (ms) para operaciones que no lo especifiquen
         context.set_default_timeout(self.config.get("implicit_wait", 10) * 1000)
 
-        page = context.new_page()
+        self._migrate_cookies_if_needed(context, user_data_dir)
+
+        page = context.pages[0] if context.pages else context.new_page()
         self.logger.info("[Driver] Patchright listo. URL inicial: %s", page.url or "(blank)")
-        return browser, context, page
+        return context, page
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -1180,13 +1246,21 @@ class FacebookPoster:
         except Exception:
             self.logger.debug("Error cerrando context", exc_info=True)
         try:
-            self.browser.close()
-        except Exception:
-            self.logger.debug("Error cerrando browser", exc_info=True)
-        try:
             self._pw.stop()
             self.logger.info("Browser closed for %s", self.account.name)
         except Exception:
             self.logger.warning(
                 "Error closing Playwright for %s", self.account.name, exc_info=True
             )
+        # Liberar lock file del profile persistente (si existe)
+        try:
+            lock_file = (
+                Path(__file__).resolve().parent
+                / "browser_profiles"
+                / self.account.name
+                / ".lock"
+            )
+            if lock_file.exists():
+                lock_file.unlink()
+        except Exception:
+            self.logger.debug("No se pudo eliminar .lock del profile", exc_info=True)
