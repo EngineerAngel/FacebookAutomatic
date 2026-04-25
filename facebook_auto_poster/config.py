@@ -52,6 +52,13 @@ CONFIG: dict = {
 
     "execution_mode": os.getenv("EXECUTION_MODE", "sequential").strip().lower(),
     "api_port": int(os.getenv("API_PORT", "5000")),
+    # Pool de workers (Fase 2.3): cuántos jobs (cada uno con potencialmente
+    # varias cuentas) corren en paralelo. Más de 2-3 Chromes simultáneos
+    # desde la misma IP/host aumenta detección.
+    "max_concurrent_workers": int(os.getenv("MAX_CONCURRENT_WORKERS", "2")),
+    # Rate limit por cuenta (protege contra ráfagas que disparan soft-bans)
+    "max_posts_per_account_per_hour": 3,
+    "max_posts_per_account_per_day": 15,
     # Idle aleatorio entre publicaciones (simula distracción humana)
     "idle_probability": 0.20,
     "idle_min_seconds": 5,

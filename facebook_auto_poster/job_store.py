@@ -579,6 +579,27 @@ def count_jobs_by_status() -> dict[str, int]:
         return {r["status"]: int(r["n"]) for r in rows}
 
 
+def account_recent_post_count(account_name: str, window_minutes: int = 60) -> int:
+    """Cuenta publicaciones exitosas de una cuenta en los últimos N minutos.
+
+    Usado por el rate limiter por cuenta (Fase 2.3) — previene ráfagas que
+    disparan soft-bans.
+    """
+    from datetime import timedelta
+    cutoff = (datetime.now() - timedelta(minutes=window_minutes)).isoformat()
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) AS n
+               FROM job_results jr JOIN jobs j ON jr.job_id = j.id
+               WHERE jr.account_name = ?
+                 AND jr.success = 1
+                 AND jr.account_name != '__system__'
+                 AND (j.finished_at IS NOT NULL AND j.finished_at >= ?)""",
+            (account_name, cutoff),
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+
 # ---------------------------------------------------------------------------
 # Rate limiter persistente (SQLite)
 # ---------------------------------------------------------------------------

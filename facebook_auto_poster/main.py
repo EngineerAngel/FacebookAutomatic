@@ -80,9 +80,11 @@ def _install_signal_handlers() -> None:
 
     Al recibir la señal:
     1. Detiene scheduler_runner
-    2. Marca jobs 'running' como 'interrupted' en DB
-    3. Sale del proceso — waitress atrapa la señal y cierra su loop
+    2. Cancela jobs encolados en el ThreadPoolExecutor (2.3)
+    3. Marca jobs 'running' como 'interrupted' en DB
+    4. Sale del proceso — waitress atrapa la señal y cierra su loop
     """
+    import api_server
     import job_store
     import scheduler_runner
 
@@ -93,6 +95,7 @@ def _install_signal_handlers() -> None:
         main_logger.warning("Señal %s recibida — iniciando shutdown graceful", signum)
         try:
             scheduler_runner.stop()
+            api_server.shutdown_executor(wait=False)
             n = job_store.mark_running_as_interrupted()
             if n:
                 main_logger.info("Marcados %d jobs 'running' → 'interrupted'", n)

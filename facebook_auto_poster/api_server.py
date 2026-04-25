@@ -29,6 +29,7 @@ import secrets
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -45,6 +46,31 @@ app = Flask(__name__)
 
 # Timestamp del arranque para reportar uptime en /health
 _START_TIME = time.time()
+
+# ---------------------------------------------------------------------------
+# Pool de workers (Fase 2.3)
+# ---------------------------------------------------------------------------
+# ThreadPoolExecutor con límite → evita que 10 requests simultáneos lancen
+# 10 Chromes. sync_playwright + threading no es oficialmente thread-safe,
+# pero con max_concurrent_workers <= 2-3 y locks por cuenta funciona en
+# la práctica. Cada lock garantiza que una misma cuenta no tenga dos
+# browsers/jobs compitiendo por el mismo user_data_dir.
+_executor = ThreadPoolExecutor(
+    max_workers=CONFIG.get("max_concurrent_workers", 2),
+    thread_name_prefix="fb-worker",
+)
+_account_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
+_running_accounts: set[str] = set()
+_running_accounts_lock = threading.Lock()
+
+
+def _get_account_lock(name: str) -> threading.Lock:
+    """Retorna el Lock asociado a una cuenta, creándolo si no existe."""
+    with _locks_guard:
+        if name not in _account_locks:
+            _account_locks[name] = threading.Lock()
+        return _account_locks[name]
 
 
 @app.get("/")
@@ -290,12 +316,57 @@ def _resolve_accounts(
     return accounts, None
 
 
+def _filter_rate_limited_accounts(accounts):
+    """Aparta cuentas que ya alcanzaron su tope por hora/día.
+
+    Retorna (ok, skipped) donde skipped es lista de (account, reason).
+    """
+    max_h = CONFIG.get("max_posts_per_account_per_hour", 3)
+    max_d = CONFIG.get("max_posts_per_account_per_day", 15)
+    ok, skipped = [], []
+    for a in accounts:
+        h = job_store.account_recent_post_count(a.name, window_minutes=60)
+        if h >= max_h:
+            skipped.append((a, f"rate_limit_h={h}/{max_h}"))
+            continue
+        d = job_store.account_recent_post_count(a.name, window_minutes=24 * 60)
+        if d >= max_d:
+            skipped.append((a, f"rate_limit_d={d}/{max_d}"))
+            continue
+        ok.append(a)
+    return ok, skipped
+
+
 def _run_job(job_id: str, accounts, text: str,
              image_path: str | None, callback_url: str | None) -> None:
+    # Adquirir locks por cuenta en orden lexicográfico para prevenir deadlocks
+    # cuando dos jobs comparten cuentas en distintos órdenes.
+    accounts_sorted = sorted(accounts, key=lambda a: a.name)
+    locks = [_get_account_lock(a.name) for a in accounts_sorted]
+    for lk in locks:
+        lk.acquire()
+    for a in accounts_sorted:
+        with _running_accounts_lock:
+            _running_accounts.add(a.name)
+
     job_store.mark_running(job_id)
     try:
+        # Rate limit por cuenta: filtrar las que excedieron su tope
+        runnable, skipped = _filter_rate_limited_accounts(accounts)
+        for acc, reason in skipped:
+            logger.warning(
+                "Job %s: cuenta %s saltada (%s)",
+                job_id, acc.name, reason,
+            )
+        if not runnable:
+            msg = f"Todas las cuentas excedieron su rate limit ({len(skipped)} saltadas)"
+            logger.warning("Job %s: %s", job_id, msg)
+            job_store.mark_failed(job_id, msg)
+            webhook.fire(callback_url, job_id, "failed", error_msg=msg)
+            return
+
         mgr = AccountManager(
-            accounts, CONFIG, text,
+            runnable, CONFIG, text,
             image_path=image_path, callback_url=callback_url,
         )
         results = mgr.run()
@@ -307,6 +378,35 @@ def _run_job(job_id: str, accounts, text: str,
         job_store.mark_failed(job_id, "Unhandled exception in worker")
         webhook.fire(callback_url, job_id, "failed",
                      error_msg="Unhandled exception in worker")
+    finally:
+        for a in accounts_sorted:
+            with _running_accounts_lock:
+                _running_accounts.discard(a.name)
+        for lk in reversed(locks):
+            try:
+                lk.release()
+            except RuntimeError:
+                pass
+
+
+def _enqueue_job(job_id: str, accounts, text: str,
+                 image_path: str | None, callback_url: str | None) -> None:
+    """Envía un job al pool. Max_workers limita la concurrencia global."""
+    _executor.submit(_run_job, job_id, accounts, text, image_path, callback_url)
+
+
+def shutdown_executor(wait: bool = False) -> None:
+    """Detiene el pool. Invocado desde main.py en graceful shutdown.
+
+    wait=False por default: no bloquea al signal handler; los browsers
+    abiertos se cierran cuando terminen sus operaciones activas. Los
+    jobs en cola se descartan (se reencolan en el próximo arranque
+    por la lógica de orphan recovery de 2.4).
+    """
+    try:
+        _executor.shutdown(wait=wait, cancel_futures=True)
+    except Exception:
+        logger.exception("Error cerrando ThreadPoolExecutor")
 
 
 # ===========================================================================
@@ -385,13 +485,8 @@ def handle_post():
     logger.info("Job %s aceptado | cuentas=%s", job_id,
                 [a.name for a in accounts])
 
-    threading.Thread(
-        target=_run_job,
-        args=(job_id, accounts, payload["text"],
-              payload["image_path"], payload["callback_url"]),
-        daemon=True,
-        name=f"worker-{job_id}",
-    ).start()
+    _enqueue_job(job_id, accounts, payload["text"],
+                 payload["image_path"], payload["callback_url"])
 
     return jsonify({
         "status": "accepted",
@@ -641,6 +736,20 @@ def admin_clear_ban(name: str):
     return jsonify({"ok": True, "account": name})
 
 
+@app.get("/admin/api/queue")
+@admin_required
+def admin_queue_status():
+    """Estado del pool de workers en tiempo real."""
+    with _running_accounts_lock:
+        in_progress = sorted(_running_accounts)
+    return jsonify({
+        "max_workers": CONFIG.get("max_concurrent_workers", 2),
+        "accounts_in_progress": in_progress,
+        "pending_jobs": job_store.count_pending_jobs(),
+        "jobs_by_status": job_store.count_jobs_by_status(),
+    })
+
+
 # ===========================================================================
 # ADMIN — Página de publicación
 # ===========================================================================
@@ -684,12 +793,7 @@ def admin_post():
     logger.info("Job %s aceptado via admin | cuentas=%s", job_id,
                 [a.name for a in accounts])
 
-    threading.Thread(
-        target=_run_job,
-        args=(job_id, accounts, payload["text"], payload["image_path"], None),
-        daemon=True,
-        name=f"worker-{job_id}",
-    ).start()
+    _enqueue_job(job_id, accounts, payload["text"], payload["image_path"], None)
 
     return jsonify({
         "status": "accepted",
