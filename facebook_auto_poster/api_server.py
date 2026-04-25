@@ -42,6 +42,7 @@ from config import CONFIG, load_accounts
 from account_manager import AccountManager
 import job_store
 import webhook
+from group_discoverer import discover_groups_for_account
 try:
     from crypto import encrypt_password as _encrypt_password
     _CRYPTO_AVAILABLE = True
@@ -446,6 +447,34 @@ def shutdown_executor(wait: bool = False) -> None:
         logger.exception("Error cerrando ThreadPoolExecutor")
 
 
+def _run_discovery(run_id: str, account_name: str) -> None:
+    """Ejecuta el descubrimiento de grupos para una cuenta en un thread."""
+    try:
+        accounts = load_accounts()
+        account = next((a for a in accounts if a.name == account_name), None)
+        if not account:
+            job_store.fail_discovery_run(
+                run_id, f"Cuenta '{account_name}' no encontrada"
+            )
+            return
+
+        logger.info("[%s] Iniciando descubrimiento de grupos (run=%s)", account_name, run_id)
+        groups = discover_groups_for_account(account, CONFIG)
+
+        now = datetime.now().isoformat()
+        for g in groups:
+            job_store.upsert_discovered_group(
+                account_name, g["id"], g["name"], now
+            )
+
+        job_store.finish_discovery_run(run_id, len(groups))
+        logger.info("[%s] Descubrimiento completado: %d grupos (run=%s)",
+                   account_name, len(groups), run_id)
+    except Exception as e:
+        logger.exception("[%s] Error en descubrimiento (run=%s)", account_name, run_id)
+        job_store.fail_discovery_run(run_id, str(e))
+
+
 # ===========================================================================
 # ENDPOINTS OPENCLAW (todos protegidos con X-API-Key)
 # ===========================================================================
@@ -781,6 +810,102 @@ def admin_set_account_password(name: str):
 
     logger.info("Password individual configurado para cuenta '%s'", name)
     return jsonify({"status": "updated", "account": name})
+
+
+# ===========================================================================
+# ADMIN API — Descubrimiento de grupos (Fase 2.10)
+# ===========================================================================
+
+@app.post("/admin/api/accounts/<name>/discover-groups")
+@admin_required
+def admin_trigger_discovery(name: str):
+    """
+    Inicia descubrimiento automático de grupos para una cuenta.
+    Retorna {run_id, status: "running"} para polling.
+    """
+    # Verificar que la cuenta existe
+    accounts = load_accounts()
+    if not any(a.name == name for a in accounts):
+        return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
+
+    run_id = uuid.uuid4().hex[:12]
+    job_store.create_discovery_run(run_id, name)
+
+    # Lanzar en thread daemon
+    threading.Thread(
+        target=_run_discovery,
+        args=(run_id, name),
+        daemon=True,
+        name=f"discovery-{name}",
+    ).start()
+
+    logger.info("Descubrimiento iniciado para '%s' (run=%s)", name, run_id)
+    return jsonify({"run_id": run_id, "status": "running"}), 202
+
+
+@app.get("/admin/api/discovery/<run_id>")
+@admin_required
+def admin_discovery_status(run_id: str):
+    """Polling del estado de un descubrimiento."""
+    run = job_store.get_discovery_run(run_id)
+    if not run:
+        return jsonify({"error": "run_id no encontrado"}), 404
+    return jsonify(run), 200
+
+
+@app.get("/admin/api/accounts/<name>/discovered-groups")
+@admin_required
+def admin_list_discovered_groups(name: str):
+    """Lista grupos descubiertos para una cuenta."""
+    # Verificar que la cuenta existe
+    accounts = load_accounts()
+    if not any(a.name == name for a in accounts):
+        return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
+
+    groups = job_store.list_discovered_groups(name)
+    return jsonify({
+        "account": name,
+        "groups": groups,
+        "total": len(groups),
+        "pending": sum(1 for g in groups if not g["added_to_posting"]),
+    }), 200
+
+
+@app.post("/admin/api/accounts/<name>/discovered-groups/<group_id>/add")
+@admin_required
+def admin_add_discovered_group(name: str, group_id: str):
+    """
+    Añade un grupo descubierto a la lista activa de publicación de la cuenta.
+    Actualiza tanto discovered_groups.added_to_posting como accounts.groups.
+    """
+    # Obtener los detalles actuales de la cuenta
+    rows = job_store.list_accounts_full()
+    account = next((r for r in rows if r["name"] == name), None)
+    if not account:
+        return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
+
+    # Obtener lista de grupos actual
+    groups = json.loads(account.get("groups") or "[]")
+
+    # Añadir si no está ya en la lista
+    if group_id not in groups:
+        groups.append(group_id)
+        # Actualizar account con nuevo grupo
+        job_store.update_account(
+            name,
+            account["email"],
+            groups,
+        )
+        logger.info("Grupo %s añadido a la lista de '%s'", group_id, name)
+
+    # Marcar como added_to_posting en la tabla de descubrimiento
+    job_store.mark_group_added_to_posting(name, group_id)
+
+    return jsonify({
+        "status": "added",
+        "account": name,
+        "group_id": group_id,
+    }), 200
 
 
 # ===========================================================================

@@ -119,6 +119,27 @@ def init_db() -> None:
                 created_at    REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS discovery_runs (
+                id            TEXT PRIMARY KEY,
+                account_name  TEXT NOT NULL,
+                status        TEXT NOT NULL DEFAULT 'running',
+                started_at    TEXT NOT NULL,
+                finished_at   TEXT,
+                groups_found  INTEGER DEFAULT 0,
+                error         TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS discovered_groups (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_name     TEXT NOT NULL,
+                group_id         TEXT NOT NULL,
+                group_name       TEXT NOT NULL,
+                discovered_at    TEXT NOT NULL,
+                added_to_posting INTEGER NOT NULL DEFAULT 0,
+                last_seen        TEXT NOT NULL,
+                UNIQUE(account_name, group_id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_jobs_scheduled ON jobs(scheduled_for)
                 WHERE type = 'scheduled';
@@ -847,3 +868,96 @@ def list_pending_scheduled() -> list[dict]:
             }
             for r in rows
         ]
+
+
+# ---------------------------------------------------------------------------
+# Descubrimiento de grupos (Fase 2.10)
+# ---------------------------------------------------------------------------
+def create_discovery_run(run_id: str, account_name: str) -> None:
+    """Inicia un nuevo run de descubrimiento. Estado inicial: 'running'."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO discovery_runs (id, account_name, status, started_at)
+               VALUES (?, ?, ?, ?)""",
+            (run_id, account_name, "running", now),
+        )
+
+
+def finish_discovery_run(run_id: str, groups_found: int) -> None:
+    """Marca un run como completado exitosamente."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """UPDATE discovery_runs
+               SET status='done', finished_at=?, groups_found=?
+               WHERE id=?""",
+            (now, groups_found, run_id),
+        )
+
+
+def fail_discovery_run(run_id: str, error: str) -> None:
+    """Marca un run como fallido con mensaje de error."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """UPDATE discovery_runs
+               SET status='failed', finished_at=?, error=?
+               WHERE id=?""",
+            (now, error[:500], run_id),
+        )
+
+
+def get_discovery_run(run_id: str) -> dict | None:
+    """Obtiene el estado de un run de descubrimiento."""
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM discovery_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def upsert_discovered_group(
+    account_name: str,
+    group_id: str,
+    group_name: str,
+    discovered_at: str,
+) -> None:
+    """Guarda o actualiza un grupo descubierto. Si existe, actualiza last_seen."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO discovered_groups
+               (account_name, group_id, group_name, discovered_at, last_seen)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(account_name, group_id)
+               DO UPDATE SET
+                   last_seen = excluded.last_seen,
+                   group_name = excluded.group_name""",
+            (account_name, group_id, group_name, discovered_at, discovered_at),
+        )
+
+
+def list_discovered_groups(account_name: str) -> list[dict]:
+    """Lista grupos descubiertos de una cuenta, pendientes primero."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """SELECT group_id, group_name, discovered_at, added_to_posting, last_seen
+               FROM discovered_groups
+               WHERE account_name=?
+               ORDER BY added_to_posting ASC, discovered_at DESC""",
+            (account_name,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_group_added_to_posting(account_name: str, group_id: str) -> bool:
+    """Marca un grupo descubierto como añadido a la lista de publicación."""
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            """UPDATE discovered_groups
+               SET added_to_posting=1
+               WHERE account_name=? AND group_id=?""",
+            (account_name, group_id),
+        )
+        return cur.rowcount > 0

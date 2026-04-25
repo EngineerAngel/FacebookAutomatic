@@ -430,8 +430,15 @@ async function loadAccounts() {
     tdPub.textContent = fmt(acc.last_published_at);
 
     const tdAcc = document.createElement('td');
+    const btnDiscover = document.createElement('button');
+    btnDiscover.className = 'btn btn-edit btn-sm';
+    btnDiscover.title = 'Buscar grupos automáticamente';
+    btnDiscover.textContent = '🔍';
+    btnDiscover.onclick = () => triggerDiscovery(acc.name, btnDiscover);
+
     const btnEdit = document.createElement('button');
     btnEdit.className = 'btn btn-edit btn-sm';
+    btnEdit.style.marginLeft = '0.4rem';
     btnEdit.textContent = '✏ Editar';
     btnEdit.onclick = () => openModal(acc);
 
@@ -441,6 +448,7 @@ async function loadAccounts() {
     btnDel.textContent = '✕ Eliminar';
     btnDel.onclick = () => deleteAccount(acc.name);
 
+    tdAcc.appendChild(btnDiscover);
     tdAcc.appendChild(btnEdit);
     tdAcc.appendChild(btnDel);
 
@@ -711,6 +719,120 @@ async function loadHistory() {
     tr.appendChild(tdStatus);
     tbody.appendChild(tr);
   });
+}
+
+// ─── Descubrimiento de grupos (Fase 2.10) ─────────────────────────────────
+async function triggerDiscovery(accountName, btn) {
+  btn.disabled = true;
+  btn.textContent = '⏳';
+
+  const { ok, data } = await api('POST', `/admin/api/accounts/${accountName}/discover-groups`);
+  if (!ok) {
+    toast(`Error al iniciar búsqueda: ${data?.error ?? 'Error desconocido'}`, true);
+    btn.disabled = false;
+    btn.textContent = '🔍';
+    return;
+  }
+
+  const runId = data.run_id;
+  pollDiscovery(runId, accountName, btn);
+}
+
+function pollDiscovery(runId, accountName, btn) {
+  const pollInterval = setInterval(async () => {
+    const { ok, data } = await api('GET', `/admin/api/discovery/${runId}`);
+    if (!ok) {
+      clearInterval(pollInterval);
+      btn.disabled = false;
+      btn.textContent = '🔍';
+      return;
+    }
+
+    const run = data;
+    if (run.status === 'done') {
+      clearInterval(pollInterval);
+      btn.disabled = false;
+      btn.textContent = '🔍';
+      toast(`✅ ${run.groups_found} grupos encontrados para ${accountName}`);
+      // Recargar lista de cuentas para reflejar grupos nuevos
+      loadAccounts();
+    } else if (run.status === 'failed') {
+      clearInterval(pollInterval);
+      btn.disabled = false;
+      btn.textContent = '🔍';
+      toast(`❌ Error al buscar grupos: ${run.error ?? 'desconocido'}`, true);
+    }
+  }, 3000);  // poll cada 3 segundos
+}
+
+async function loadDiscoveredGroupsPanel(accountName) {
+  const { ok, data } = await api('GET', `/admin/api/accounts/${accountName}/discovered-groups`);
+  if (!ok) {
+    toast('Error al cargar grupos descubiertos', true);
+    return;
+  }
+
+  const { groups } = data;
+  const pending = groups.filter(g => !g.added_to_posting);
+  const added = groups.filter(g => g.added_to_posting);
+
+  const panelId = 'discovered-groups-panel';
+  let panel = document.getElementById(panelId);
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = panelId;
+    panel.style.marginTop = '1.5rem';
+    document.getElementById('tab-groups').appendChild(panel);
+  }
+
+  let html = '<h3 style="margin-bottom: 1rem; color: #94a3b8;">Grupos descubiertos</h3>';
+
+  if (pending.length > 0) {
+    html += '<p style="font-size: 0.85rem; color: #64748b; margin-bottom: 0.5rem;">Pendientes de añadir:</p>';
+    html += '<div style="display: grid; gap: 0.5rem; margin-bottom: 1rem;">';
+    pending.forEach(g => {
+      html += `<div style="display: flex; align-items: center; justify-content: space-between;
+                           padding: 0.5rem; background: #151823; border-radius: 6px; font-size: 0.85rem;">
+                <div>
+                  <strong>${g.group_name}</strong><br/>
+                  <span style="color: #64748b;">${g.group_id}</span>
+                </div>
+                <button class="btn btn-save btn-sm" onclick="addDiscoveredGroup('${accountName}', '${g.group_id}')">
+                  + Añadir
+                </button>
+              </div>`;
+    });
+    html += '</div>';
+  }
+
+  if (added.length > 0) {
+    html += '<p style="font-size: 0.85rem; color: #64748b; margin-bottom: 0.5rem;">Ya añadidos a publicación:</p>';
+    html += '<div style="display: grid; gap: 0.5rem;">';
+    added.forEach(g => {
+      html += `<div style="padding: 0.5rem; background: #14532d; border-radius: 6px; font-size: 0.85rem;">
+                <strong>${g.group_name}</strong><br/>
+                <span style="color: #64748b;">${g.group_id}</span>
+              </div>`;
+    });
+    html += '</div>';
+  }
+
+  if (pending.length === 0 && added.length === 0) {
+    html += '<p style="color: #64748b; font-size: 0.85rem;">Sin grupos descubiertos aún.</p>';
+  }
+
+  panel.innerHTML = html;
+}
+
+async function addDiscoveredGroup(accountName, groupId) {
+  const { ok, data } = await api('POST', `/admin/api/accounts/${accountName}/discovered-groups/${groupId}/add`);
+  if (ok) {
+    toast('✅ Grupo añadido a publicaciones');
+    loadDiscoveredGroupsPanel(accountName);
+    loadAccounts();
+  } else {
+    toast(`❌ ${data?.error ?? 'Error'}`, true);
+  }
 }
 
 // ─── Cerrar modal con Escape ──────────────────────────────────────────────
