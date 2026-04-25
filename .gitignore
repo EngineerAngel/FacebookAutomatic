@@ -56,3 +56,4 @@ jobs.db-shm
 *.exe
 cloudflared.exe
 chromedriver.exe
+.secret.key
