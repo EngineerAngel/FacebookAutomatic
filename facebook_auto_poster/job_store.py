@@ -112,6 +112,13 @@ def init_db() -> None:
                 ts       REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS text_variations (
+                cache_key     TEXT PRIMARY KEY,
+                original_hash TEXT NOT NULL,
+                variated      TEXT NOT NULL,
+                created_at    REAL NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_jobs_scheduled ON jobs(scheduled_for)
                 WHERE type = 'scheduled';
@@ -638,6 +645,46 @@ def purge_old_rate_limit_events(days: int = 7) -> int:
     with _lock, _connect() as conn:
         cur = conn.execute(
             "DELETE FROM rate_limit_events WHERE ts < ?",
+            (cutoff,),
+        )
+        return int(cur.rowcount)
+
+
+# ---------------------------------------------------------------------------
+# Text variations cache (Fase 2.2)
+# ---------------------------------------------------------------------------
+def get_text_variation(cache_key: str, ttl_seconds: int) -> str | None:
+    """Retorna el parafraseo cacheado si no ha expirado, None si miss/expirado."""
+    cutoff = time.time() - ttl_seconds
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """SELECT variated FROM text_variations
+               WHERE cache_key=? AND created_at >= ?""",
+            (cache_key, cutoff),
+        ).fetchone()
+        return row["variated"] if row else None
+
+
+def save_text_variation(cache_key: str, original_hash: str, variated: str) -> None:
+    """Guarda (o reemplaza) una variación cacheada."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO text_variations (cache_key, original_hash, variated, created_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(cache_key) DO UPDATE SET
+                   original_hash = excluded.original_hash,
+                   variated      = excluded.variated,
+                   created_at    = excluded.created_at""",
+            (cache_key, original_hash, variated, time.time()),
+        )
+
+
+def purge_old_text_variations(days: int = 7) -> int:
+    """Elimina variaciones más viejas que N días. Retorna filas eliminadas."""
+    cutoff = time.time() - days * 86400
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM text_variations WHERE created_at < ?",
             (cutoff,),
         )
         return int(cur.rowcount)

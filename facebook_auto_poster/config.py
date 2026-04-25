@@ -48,7 +48,7 @@ CONFIG: dict = {
     "emunium_enabled": True,              # False = solo Patchright (sin mouse/keyboard OS-level)
     "implicit_wait": 10,
     "max_retries": 3,
-    "text_variation_mode": True,
+    "text_variation_mode": "gemini",  # "gemini" | "zero_width" | "off"
 
     "execution_mode": os.getenv("EXECUTION_MODE", "sequential").strip().lower(),
     "api_port": int(os.getenv("API_PORT", "5000")),

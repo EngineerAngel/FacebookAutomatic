@@ -285,6 +285,92 @@ class GeminiCommenter:
                 )
                 return None
 
+    def generate_text(
+        self,
+        prompt: str,
+        max_tokens: int = 600,
+    ) -> Optional[str]:
+        """Genera texto libre (text-only) reusando rotación de claves y cooldown.
+
+        A diferencia de generate_comment() — que está optimizado para
+        comentarios cortos con multimodal + sanitize agresivo — esto es
+        un wrapper genérico para prompts arbitrarios (p.ej. parafraseo
+        de textos de anuncios en Fase 2.2).
+
+        Retorna el texto generado, o None si falla / degraded / sin claves.
+        Nunca levanta excepción.
+        """
+        if not self.enabled or not (prompt or "").strip():
+            return None
+
+        cls = type(self)
+        tried: set[int] = set()
+        while True:
+            future: Optional[Future] = None
+            slot: Optional[_KeySlot] = None
+            t0: float = 0.0
+
+            with cls._class_lock:
+                now = time.time()
+                if now < cls._class_degraded_until:
+                    return None
+                pending = cls._class_pending_future
+                if pending is not None and not pending.done():
+                    return None
+
+                slot = self._next_usable_slot(skip=tried)
+                if slot is None:
+                    return None
+                tried.add(slot.index)
+
+                config = None
+                try:
+                    config = genai_types.GenerateContentConfig(
+                        max_output_tokens=max_tokens,
+                    )
+                except Exception:
+                    pass
+
+                future = cls._class_executor.submit(
+                    slot.client.models.generate_content,
+                    model=self.model,
+                    contents=prompt,
+                    config=config,
+                )
+                cls._class_pending_future = future
+                cls._class_pending_started_at = now
+                t0 = now
+                future.add_done_callback(cls._on_request_done)
+
+            try:
+                resp = future.result(timeout=GEMINI_HARD_TIMEOUT_S)
+                elapsed = time.time() - t0
+                raw = (resp.text or "").strip()
+                self.logger.debug(
+                    "[Gemini] generate_text clave %d: %.2fs, %d chars",
+                    slot.index + 1, elapsed, len(raw),
+                )
+                return raw or None
+
+            except concurrent.futures.TimeoutError:
+                with cls._class_lock:
+                    cls._class_degraded_until = time.time() + GEMINI_DEGRADED_COOLDOWN_S
+                self.logger.warning(
+                    "[Gemini] generate_text timeout %ds — cooldown %ds",
+                    GEMINI_HARD_TIMEOUT_S, GEMINI_DEGRADED_COOLDOWN_S,
+                )
+                return None
+
+            except Exception as exc:
+                if _is_quota_error(exc):
+                    slot.mark_exhausted(self.logger)
+                    continue
+                self.logger.warning(
+                    "[Gemini] generate_text error en clave %d: %s",
+                    slot.index + 1, exc,
+                )
+                return None
+
     def is_available(self) -> bool:
         """True si no está degradado ni hay petición en vuelo. Solo informativo."""
         if not self.enabled:

@@ -38,6 +38,7 @@ import job_store
 import webhook
 from gemini_commenter import GeminiCommenter
 from human_browsing import HumanBrowsing
+from text_variation import TextVariator
 
 # ---------------------------------------------------------------------------
 # Text-variation helpers
@@ -165,6 +166,26 @@ class FacebookPoster:
                 model=config.get("gemini_model", "gemini-2.5-flash"),
                 timeout=config.get("gemini_timeout", 15),
                 lang=config.get("gemini_comment_lang", "es-MX"),
+                logger=self.logger,
+            )
+
+        # -- Text variator (Gemini paraphrase, Fase 2.2) -----------------
+        self._text_variator: TextVariator | None = None
+        if config.get("text_variation_mode", "off") == "gemini":
+            api_keys = config.get("gemini_api_keys", [])
+            if isinstance(api_keys, str):
+                api_keys = [api_keys]
+            _gemini_for_variation = self._gemini or (
+                GeminiCommenter(
+                    api_keys=api_keys,
+                    model=config.get("gemini_model", "gemini-2.5-flash"),
+                    timeout=config.get("gemini_timeout", 15),
+                    lang=config.get("gemini_comment_lang", "es-MX"),
+                    logger=self.logger,
+                ) if api_keys else None
+            )
+            self._text_variator = TextVariator(
+                gemini=_gemini_for_variation,
                 logger=self.logger,
             )
 
@@ -1194,10 +1215,7 @@ class FacebookPoster:
         Returns a dict mapping group_id -> success boolean.
         """
         results: dict[str, bool] = {}
-
-        if self.config.get("text_variation_mode", False):
-            text = _vary_text(text, self.account.name)
-            self.logger.debug("Text variation applied for %s", self.account.name)
+        variation_mode = self.config.get("text_variation_mode", "off")
 
         groups = self.account.groups[: self.config["max_groups_per_session"]]
 
@@ -1221,7 +1239,19 @@ class FacebookPoster:
                     results[remaining] = False
                 break
 
-            success = self.publish(group_id, text, image_path=image_path)
+            # Variación de texto por (cuenta, grupo) — diferente para cada destino
+            group_text = text
+            if variation_mode == "gemini" and self._text_variator:
+                group_text = self._text_variator.variate(text, self.account.name, group_id)
+            elif variation_mode == "zero_width":
+                group_text = _vary_text(text, self.account.name)
+
+            self.logger.debug(
+                "[Variation] mode=%s account=%s group=%s orig=%d final=%d chars",
+                variation_mode, self.account.name, group_id, len(text), len(group_text),
+            )
+
+            success = self.publish(group_id, group_text, image_path=image_path)
             results[group_id] = success
 
             # Wait between groups, but not after the last one
