@@ -84,7 +84,7 @@ Elevar el proyecto **Facebook Auto-Poster** a un estado donde:
 
 | Fase | Estado | Notas |
 |------|--------|-------|
-| Fase 1 | ✅ 5/6 completos | 1.1 (proxies) pendiente — necesita hardware |
+| Fase 1 | ✅ 6/6 completos | 1.1 código implementado — pendiente setup físico del teléfono |
 | Fase 2 | ✅ 9/9 completos | Integrada en master. Pendiente pruebas formales. |
 | **Fase 2.10** | ✅ **COMPLETADO** | Auto-descubrimiento con trigger manual + notificaciones en admin. Pendiente E2E testing. |
 | Fase 3 | ⏳ No iniciada | Prerrequisito: Fases 1+2 estables 2+ semanas |

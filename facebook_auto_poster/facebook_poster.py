@@ -35,6 +35,7 @@ except ImportError:
 
 from config import AccountConfig
 import job_store
+import proxy_manager
 import webhook
 from gemini_commenter import GeminiCommenter
 from human_browsing import HumanBrowsing
@@ -283,22 +284,36 @@ class FacebookPoster:
 
         user_data_dir = self._resolve_user_data_dir()
 
-        try:
-            context = self._pw.chromium.launch_persistent_context(
-                user_data_dir=str(user_data_dir),
-                headless=headless,
-                args=args,
-                user_agent=user_agent,
-                viewport={"width": w, "height": h},
-                locale=locale,
-                timezone_id=fp.get("timezone") or self.account.timezone,
-                color_scheme=fp.get("color_scheme", "light"),
-                extra_http_headers={
-                    "sec-ch-ua": fp.get("sec_ch_ua", ""),
-                    "sec-ch-ua-platform": fp.get("sec_ch_ua_platform", '"Windows"'),
-                    "sec-ch-ua-mobile": "?0",
-                },
+        # Resolver proxy SIM para esta cuenta
+        proxy = proxy_manager.resolve_proxy(self.account.name)
+        if proxy:
+            self.logger.info("[Driver] Usando proxy %s", proxy["server"])
+        else:
+            self.logger.warning(
+                "[Driver] Sin proxy asignado para '%s' — usando IP directa del servidor",
+                self.account.name,
             )
+
+        launch_kwargs: dict = dict(
+            user_data_dir=str(user_data_dir),
+            headless=headless,
+            args=args,
+            user_agent=user_agent,
+            viewport={"width": w, "height": h},
+            locale=locale,
+            timezone_id=fp.get("timezone") or self.account.timezone,
+            color_scheme=fp.get("color_scheme", "light"),
+            extra_http_headers={
+                "sec-ch-ua": fp.get("sec_ch_ua", ""),
+                "sec-ch-ua-platform": fp.get("sec_ch_ua_platform", '"Windows"'),
+                "sec-ch-ua-mobile": "?0",
+            },
+        )
+        if proxy:
+            launch_kwargs["proxy"] = proxy
+
+        try:
+            context = self._pw.chromium.launch_persistent_context(**launch_kwargs)
         except Exception:
             self.logger.error("[Driver] FALLO al lanzar Chromium parcheado", exc_info=True)
             raise

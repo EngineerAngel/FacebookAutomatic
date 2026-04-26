@@ -152,6 +152,26 @@ def init_db() -> None:
                 ON rate_limit_events(ip, endpoint, ts);
         """)
 
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS proxy_nodes (
+                id               TEXT PRIMARY KEY,
+                label            TEXT NOT NULL,
+                server           TEXT NOT NULL,
+                status           TEXT NOT NULL DEFAULT 'online',
+                last_checked     TEXT,
+                last_seen_ip     TEXT,
+                check_fail_count INTEGER NOT NULL DEFAULT 0,
+                notes            TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS account_proxy_assignment (
+                account_name   TEXT PRIMARY KEY REFERENCES accounts(name),
+                primary_node   TEXT NOT NULL REFERENCES proxy_nodes(id),
+                secondary_node TEXT REFERENCES proxy_nodes(id),
+                assigned_at    TEXT NOT NULL
+            );
+        """)
+
         # Migraciones seguras — no fallan si la columna ya existe
         for stmt in [
             "ALTER TABLE job_results ADD COLUMN group_tag TEXT NOT NULL DEFAULT 'generico'",
@@ -961,3 +981,174 @@ def mark_group_added_to_posting(account_name: str, group_id: str) -> bool:
             (account_name, group_id),
         )
         return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Proxy nodes — CRUD
+# ---------------------------------------------------------------------------
+
+def upsert_proxy_node(
+    node_id: str,
+    label: str,
+    server: str,
+    notes: str = "",
+) -> None:
+    """Crea o actualiza un nodo proxy. No resetea status/ip si ya existe."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO proxy_nodes (id, label, server, notes, last_checked)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   label  = excluded.label,
+                   server = excluded.server,
+                   notes  = excluded.notes""",
+            (node_id, label, server, notes, now),
+        )
+
+
+def list_proxy_nodes() -> list[dict]:
+    """Lista todos los nodos proxy."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """SELECT id, label, server, status, last_checked,
+                      last_seen_ip, check_fail_count, notes
+               FROM proxy_nodes ORDER BY id"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_proxy_node(node_id: str) -> dict | None:
+    """Devuelve un nodo proxy por ID, o None si no existe."""
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM proxy_nodes WHERE id=?", (node_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_proxy_node_status(
+    node_id: str,
+    *,
+    status: str | None = None,
+    last_ip: str | None = None,
+    reset_fails: bool = False,
+    fail_count: int | None = None,
+) -> None:
+    """Actualiza status, IP pública y/o contadores de fallo de un nodo."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        parts = ["last_checked = ?"]
+        params: list = [now]
+
+        if status is not None:
+            parts.append("status = ?")
+            params.append(status)
+        if last_ip is not None:
+            parts.append("last_seen_ip = ?")
+            params.append(last_ip)
+        if reset_fails:
+            parts.append("check_fail_count = 0")
+        elif fail_count is not None:
+            parts.append("check_fail_count = ?")
+            params.append(fail_count)
+
+        params.append(node_id)
+        conn.execute(
+            f"UPDATE proxy_nodes SET {', '.join(parts)} WHERE id=?",
+            params,
+        )
+
+
+def delete_proxy_node(node_id: str) -> bool:
+    """Elimina un nodo proxy. Retorna True si existía."""
+    with _lock, _connect() as conn:
+        cur = conn.execute("DELETE FROM proxy_nodes WHERE id=?", (node_id,))
+        return cur.rowcount > 0
+
+
+def get_any_online_proxy_node(exclude_nodes: list[str | None]) -> dict | None:
+    """Retorna cualquier nodo 'online' que no esté en la lista de exclusión."""
+    clean = [n for n in exclude_nodes if n]
+    with _lock, _connect() as conn:
+        if clean:
+            placeholders = ",".join("?" * len(clean))
+            row = conn.execute(
+                f"SELECT * FROM proxy_nodes WHERE status='online' AND id NOT IN ({placeholders}) LIMIT 1",
+                clean,
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM proxy_nodes WHERE status='online' LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Proxy assignments — asignación cuenta → nodo
+# ---------------------------------------------------------------------------
+
+def set_proxy_assignment(
+    account_name: str,
+    primary_node: str,
+    secondary_node: str | None = None,
+) -> None:
+    """Asigna (o reasigna) los nodos proxy de una cuenta."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO account_proxy_assignment
+                   (account_name, primary_node, secondary_node, assigned_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(account_name) DO UPDATE SET
+                   primary_node   = excluded.primary_node,
+                   secondary_node = excluded.secondary_node,
+                   assigned_at    = excluded.assigned_at""",
+            (account_name, primary_node, secondary_node, now),
+        )
+
+
+def get_proxy_assignment(account_name: str) -> dict | None:
+    """Retorna la asignación de proxy de una cuenta, o None."""
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM account_proxy_assignment WHERE account_name=?",
+            (account_name,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def delete_proxy_assignment(account_name: str) -> bool:
+    """Elimina la asignación de proxy de una cuenta."""
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM account_proxy_assignment WHERE account_name=?",
+            (account_name,),
+        )
+        return cur.rowcount > 0
+
+
+def get_accounts_for_node(node_id: str) -> list[dict]:
+    """Retorna las cuentas asignadas a un nodo (primary o secondary)."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """SELECT a.name, a.groups
+               FROM accounts a
+               JOIN account_proxy_assignment p ON p.account_name = a.name
+               WHERE (p.primary_node=? OR p.secondary_node=?) AND a.is_active=1""",
+            (node_id, node_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_proxy_assignments() -> list[dict]:
+    """Lista todas las asignaciones con info del nodo primario."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """SELECT p.account_name, p.primary_node, p.secondary_node,
+                      p.assigned_at, n.label, n.status, n.last_seen_ip
+               FROM account_proxy_assignment p
+               LEFT JOIN proxy_nodes n ON n.id = p.primary_node
+               ORDER BY p.account_name"""
+        ).fetchall()
+        return [dict(r) for r in rows]

@@ -43,72 +43,163 @@ main_logger.addHandler(_ch)
 
 
 # ---------------------------------------------------------------------------
-# Cloudflared tunnel — multiplataforma (Windows / Mac / Ubuntu)
+# Túnel público — Named Cloudflare / ngrok (estático) o Quick (aleatorio)
+#
+# setup_tunnel.sh crea estos archivos en el setup único:
+#   ~/.cloudflared/fb-autoposter.url     → URL pública permanente
+#   ~/.cloudflared/fb-autoposter.backend → "cloudflare" | "ngrok"
+#   ~/.cloudflared/config.yml            → config cloudflare (si aplica)
+#   ~/.config/ngrok/ngrok.yml            → config ngrok (si aplica)
 # ---------------------------------------------------------------------------
+
+_TUNNEL_BASE    = Path.home() / ".cloudflared"
+_URL_FILE       = _TUNNEL_BASE / "fb-autoposter.url"
+_BACKEND_FILE   = _TUNNEL_BASE / "fb-autoposter.backend"
+_CF_CONFIG_FILE = _TUNNEL_BASE / "config.yml"
+_CF_TUNNEL_NAME = "fb-autoposter"
+_NGROK_CONFIG   = Path.home() / ".config" / "ngrok" / "ngrok.yml"
+
+
+def _static_tunnel_configured() -> bool:
+    return _URL_FILE.exists() and _BACKEND_FILE.exists()
+
+
+def _read_static_url() -> str:
+    return _URL_FILE.read_text().strip()
+
+
+def _read_backend() -> str:
+    return _BACKEND_FILE.read_text().strip()
+
+
+# ---------------------------------------------------------------------------
+# Cloudflare helpers
+# ---------------------------------------------------------------------------
+
 def _find_cloudflared() -> str | None:
-    """
-    Localiza el binario cloudflared según el OS.
-
-    Orden de búsqueda:
-      1. PATH del sistema (instalado via brew, apt, winget, etc.)
-      2. Binario junto a la raíz del proyecto (fallback manual)
-
-    Retorna la ruta como str, o None si no se encuentra.
-    """
-    import platform
-    import shutil
-
-    # 1. Buscar en PATH (preferido — instalación limpia)
+    import shutil, platform
     which = shutil.which("cloudflared")
     if which:
         return which
-
-    # 2. Fallback: binario manual junto al proyecto
     system = platform.system()
-    PROJECT_ROOT = Path(__file__).resolve().parent.parent
-    candidates = {
-        "Windows": PROJECT_ROOT / "cloudflared.exe",
-        "Darwin":  PROJECT_ROOT / "cloudflared",
-        "Linux":   PROJECT_ROOT / "cloudflared",
-    }
-    candidate = candidates.get(system)
-    if candidate and candidate.exists():
-        return str(candidate)
-
-    return None
+    root = Path(__file__).resolve().parent.parent
+    candidate = root / ("cloudflared.exe" if system == "Windows" else "cloudflared")
+    return str(candidate) if candidate.exists() else None
 
 
-def start_cloudflared(port: int) -> None:
-    """Inicia cloudflared en un thread daemon separado."""
-    import platform
-
-    exe = _find_cloudflared()
-    if not exe:
-        system = platform.system()
-        install_hint = {
-            "Darwin":  "brew install cloudflared",
-            "Linux":   "sudo apt install cloudflared",
-            "Windows": "winget install Cloudflare.cloudflared  o colocar cloudflared.exe junto al proyecto",
-        }.get(system, "ver https://developers.cloudflare.com/cloudflared")
-        main_logger.warning(
-            "cloudflared no encontrado — túnel público desactivado. Instalar: %s",
-            install_hint,
-        )
-        return
-
-    def run_tunnel() -> None:
+def _start_cloudflare_tunnel(exe: str) -> None:
+    def run() -> None:
         try:
-            main_logger.info("Iniciando Cloudflare Tunnel en http://localhost:%d ...", port)
             subprocess.run(
-                [exe, "tunnel", "--url", f"http://localhost:{port}"],
+                [exe, "tunnel", "--config", str(_CF_CONFIG_FILE), "run", _CF_TUNNEL_NAME],
                 check=False,
             )
         except Exception as exc:
             main_logger.error("Error en cloudflared: %s", exc)
 
-    thread = threading.Thread(target=run_tunnel, daemon=True, name="cloudflared")
-    thread.start()
-    time.sleep(2)
+    threading.Thread(target=run, daemon=True, name="cloudflared").start()
+    time.sleep(3)
+
+
+def _start_cloudflare_quick(exe: str, port: int) -> None:
+    """Quick tunnel: captura la URL aleatoria del output de cloudflared."""
+    import re
+    ready = threading.Event()
+
+    def run() -> None:
+        try:
+            proc = subprocess.Popen(
+                [exe, "tunnel", "--url", f"http://localhost:{port}"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+            for line in proc.stdout:  # type: ignore[union-attr]
+                line = line.strip()
+                if not line:
+                    continue
+                main_logger.debug("[cloudflared] %s", line)
+                m = re.search(r'https://[^\s]+\.trycloudflare\.com', line)
+                if m and not ready.is_set():
+                    main_logger.warning("Túnel activo (TEMPORAL, cambia al reiniciar): %s", m.group(0))
+                    main_logger.warning("Para URL permanente ejecuta: ./setup_tunnel.sh")
+                    ready.set()
+            proc.wait()
+        except Exception as exc:
+            main_logger.error("Error en cloudflared quick: %s", exc)
+
+    threading.Thread(target=run, daemon=True, name="cloudflared").start()
+    ready.wait(timeout=30)
+
+
+# ---------------------------------------------------------------------------
+# ngrok helper
+# ---------------------------------------------------------------------------
+
+def _find_ngrok() -> str | None:
+    import shutil
+    return shutil.which("ngrok")
+
+
+def _start_ngrok_tunnel() -> None:
+    exe = _find_ngrok()
+    if not exe:
+        main_logger.error(
+            "ngrok no encontrado — instalar: sudo apt install ngrok  "
+            "o ver https://ngrok.com/download"
+        )
+        return
+
+    def run() -> None:
+        try:
+            subprocess.run(
+                [exe, "start", "fb-autoposter", "--config", str(_NGROK_CONFIG)],
+                check=False,
+            )
+        except Exception as exc:
+            main_logger.error("Error en ngrok: %s", exc)
+
+    threading.Thread(target=run, daemon=True, name="ngrok").start()
+    time.sleep(4)
+
+
+# ---------------------------------------------------------------------------
+# Entry point del túnel
+# ---------------------------------------------------------------------------
+
+def start_tunnel(port: int) -> None:
+    """Inicia el túnel público: estático (ngrok/cloudflare) o quick como fallback."""
+    if _static_tunnel_configured():
+        url     = _read_static_url()
+        backend = _read_backend()
+        main_logger.info("Túnel estático (%s): %s", backend, url)
+
+        if backend == "ngrok":
+            _start_ngrok_tunnel()
+        else:
+            exe = _find_cloudflared()
+            if exe:
+                _start_cloudflare_tunnel(exe)
+            else:
+                main_logger.error("cloudflared no encontrado para el named tunnel")
+                return
+
+        main_logger.info("API pública disponible en: %s", url)
+        return
+
+    # Sin config → quick tunnel de cloudflare con aviso
+    main_logger.warning(
+        "Sin túnel estático configurado — URL cambiará en cada reinicio. "
+        "Para URL permanente (gratis, sin dominio): ./setup_tunnel.sh --ngrok"
+    )
+    exe = _find_cloudflared()
+    if exe:
+        _start_cloudflare_quick(exe, port)
+    else:
+        import platform
+        hint = {"Darwin": "brew install cloudflared", "Linux": "sudo apt install cloudflared"}.get(
+            platform.system(), "ver https://developers.cloudflare.com/cloudflared"
+        )
+        main_logger.warning("cloudflared no encontrado — túnel desactivado. Instalar: %s", hint)
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +246,7 @@ def _install_signal_handlers() -> None:
 # ---------------------------------------------------------------------------
 def main() -> None:
     import job_store
+    import proxy_manager
     import scheduler_runner
     from api_server import app
     from config import load_accounts
@@ -171,6 +263,8 @@ def main() -> None:
 
     n = job_store.upsert_accounts(load_accounts())
     main_logger.info("Sincronizadas %d cuentas en DB", n)
+
+    proxy_manager.start()
     scheduler_runner.start()
 
     _install_signal_handlers()
@@ -181,8 +275,8 @@ def main() -> None:
         port,
     )
 
-    # Iniciar cloudflared para acceso HTTPS público (opcional)
-    start_cloudflared(port)
+    # Iniciar túnel público HTTPS (ngrok o cloudflare, estático si está configurado)
+    start_tunnel(port)
 
     # waitress: servidor WSGI de producción (vs Flask dev server)
     # threads=8 cubre requests HTTP del API — no tiene relación con los

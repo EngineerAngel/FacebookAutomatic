@@ -35,16 +35,11 @@ def main() -> None:
 
     logger.info("Cuentas disponibles: %s\n", ", ".join(a.name for a in accounts))
 
-    # Seleccionar cuenta
-    print("Cuentas disponibles:")
-    for i, a in enumerate(accounts):
-        print(f"  {i + 1}. {a.name}")
-    choice = input("\nElige el número de cuenta: ").strip()
-    try:
-        account = accounts[int(choice) - 1]
-    except (ValueError, IndexError):
-        logger.error("Selección inválida.")
+    # Usar automáticamente la primera cuenta
+    if not accounts:
+        logger.error("No hay cuentas configuradas.")
         sys.exit(1)
+    account = accounts[0]
     logger.info("Usando la cuenta: %s\n", account.name)
 
     # Leer texto desde anuncio.txt
@@ -88,12 +83,6 @@ def main() -> None:
     else:
         logger.error("La cuenta no tiene grupos configurados.")
         sys.exit(1)
-
-    # Confirmar antes de continuar
-    confirm = input("\n¿Continuar con la publicación? (s/n): ").strip().lower()
-    if confirm != "s":
-        logger.info("Prueba cancelada.")
-        sys.exit(0)
 
     # Ejecutar para esta cuenta única
     manager = AccountManager([account], CONFIG, text, image_path=image_path)

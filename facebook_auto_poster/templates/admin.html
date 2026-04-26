@@ -132,6 +132,40 @@ tr:hover td { background: #151823; }
 
 /* ─── Empty state ───────────────────────────────────────────────── */
 .empty { text-align: center; padding: 3rem; color: #475569; font-size: 0.9rem; }
+
+/* ─── Consulta de Grupos — tarjetas de perfil ───────────────────── */
+.profile-disc-row {
+  background: #1a1d27; border: 1px solid #2d3148; border-radius: 10px;
+  padding: 1rem 1.2rem; margin-bottom: 0.75rem; transition: border-color 0.2s;
+}
+.profile-disc-row.running { border-color: #7c8cf8; }
+.profile-disc-header {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 0.6rem;
+}
+.profile-disc-info { display: flex; flex-direction: column; gap: 0.2rem; }
+.profile-disc-name { font-weight: 600; font-size: 0.95rem; }
+.profile-disc-meta { font-size: 0.78rem; color: #64748b; }
+.profile-disc-actions { display: flex; align-items: center; gap: 0.5rem; }
+.btn-consult {
+  background: #312e81; color: #a5b4fc;
+  border: 1px solid #4338ca; font-size: 0.82rem;
+}
+.btn-consult:hover { background: #3730a3; color: #fff; }
+.btn-consult:disabled { opacity: 0.55; cursor: not-allowed; }
+.disc-result {
+  margin-top: 1rem; padding-top: 1rem;
+  border-top: 1px solid #2d3148; font-size: 0.85rem;
+}
+.disc-group-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.45rem 0.7rem; background: #151823; border-radius: 6px;
+  margin-bottom: 0.4rem;
+}
+.disc-group-item.added { background: #14532d; }
+.disc-group-name { font-weight: 500; }
+.disc-group-id { color: #64748b; font-size: 0.75rem; }
+.disc-divider { border: none; border-top: 1px solid #2d3148; margin: 1.5rem 0; }
 /* ─── Password toggle ────────────────────────────────────────────── */
 .pw-toggle {
   display: flex; gap: 0.5rem; margin-bottom: 0.75rem;
@@ -204,11 +238,23 @@ tr:hover td { background: #151823; }
 
   <!-- ══════ TAB: Grupos & Tags ══════ -->
   <div id="tab-groups" class="tab-panel">
+
+    <!-- ── Consulta de Grupos por perfil ── -->
+    <div class="section-hdr">
+      <h2>Consulta de grupos por perfil</h2>
+      <button class="btn btn-edit btn-sm" onclick="loadProfilesDiscovery()">↻ Actualizar</button>
+    </div>
+    <div id="profiles-discovery-list">
+      <div class="empty">Cargando perfiles...</div>
+    </div>
+
+    <hr class="disc-divider">
+
+    <!-- ── Etiquetas de grupos ── -->
     <div class="section-hdr">
       <h2>Etiquetas de grupos</h2>
     </div>
 
-    <!-- Formulario agregar nuevo grupo -->
     <div style="display:flex;gap:0.6rem;align-items:flex-end;margin-bottom:1.2rem;flex-wrap:wrap;">
       <div class="field" style="margin:0;flex:0 0 200px;">
         <label>Group ID</label>
@@ -345,7 +391,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
-    if (btn.dataset.tab === 'groups')  loadGroups();
+    if (btn.dataset.tab === 'groups')  { loadGroups(); loadProfilesDiscovery(); }
     if (btn.dataset.tab === 'jobs')    loadJobs();
     if (btn.dataset.tab === 'history') loadHistory();
   });
@@ -832,6 +878,170 @@ async function addDiscoveredGroup(accountName, groupId) {
     loadAccounts();
   } else {
     toast(`❌ ${data?.error ?? 'Error'}`, true);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Consulta de Grupos — lista de perfiles en pestaña Grupos & Tags
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function loadProfilesDiscovery() {
+  const container = document.getElementById('profiles-discovery-list');
+  const { ok, data } = await api('GET', '/admin/api/accounts');
+  if (!ok || !data.length) {
+    container.innerHTML = '<div class="empty">No hay cuentas configuradas</div>';
+    return;
+  }
+
+  container.innerHTML = '';
+  data.forEach(acc => {
+    const groups = JSON.parse(acc.groups || '[]');
+    const groupLabel = groups.length
+      ? `${groups.length} grupo${groups.length !== 1 ? 's' : ''} configurado${groups.length !== 1 ? 's' : ''}`
+      : 'Sin grupos configurados';
+    const groupClass = groups.length ? '' : 'badge-warn';
+
+    const row = document.createElement('div');
+    row.className = 'profile-disc-row';
+    row.id = `pdr-${acc.name}`;
+    row.innerHTML = `
+      <div class="profile-disc-header">
+        <div class="profile-disc-info">
+          <span class="profile-disc-name">${acc.name}</span>
+          <span class="profile-disc-meta">${acc.email} &nbsp;·&nbsp;
+            <span class="badge ${groupClass}" style="font-size:0.72rem;">${groupLabel}</span>
+          </span>
+        </div>
+        <div class="profile-disc-actions">
+          <button class="btn btn-edit btn-sm" title="Ver grupos encontrados anteriormente"
+            onclick="loadDiscoveryResultInline('${acc.name}')">Historial</button>
+          <button class="btn btn-consult btn-sm" id="cbtn-${acc.name}"
+            onclick="triggerDiscoveryInline('${acc.name}')">
+            Consulta de Grupos
+          </button>
+        </div>
+      </div>
+      <div id="disc-result-${acc.name}" class="disc-result" style="display:none;"></div>
+    `;
+    container.appendChild(row);
+  });
+}
+
+async function triggerDiscoveryInline(accountName) {
+  const btn  = document.getElementById(`cbtn-${accountName}`);
+  const row  = document.getElementById(`pdr-${accountName}`);
+  const panel = document.getElementById(`disc-result-${accountName}`);
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Buscando...';
+  row.classList.add('running');
+  panel.style.display = 'block';
+  panel.innerHTML = '<span style="color:#64748b;font-size:0.82rem;">Iniciando búsqueda — esto puede tardar 1-2 minutos...</span>';
+
+  const { ok, data } = await api('POST', `/admin/api/accounts/${accountName}/discover-groups`);
+  if (!ok) {
+    panel.innerHTML = `<span style="color:#fca5a5;">Error: ${data?.error ?? 'desconocido'}</span>`;
+    btn.disabled = false;
+    btn.textContent = 'Consulta de Grupos';
+    row.classList.remove('running');
+    return;
+  }
+
+  pollDiscoveryInline(data.run_id, accountName);
+}
+
+function pollDiscoveryInline(runId, accountName) {
+  const btn   = document.getElementById(`cbtn-${accountName}`);
+  const row   = document.getElementById(`pdr-${accountName}`);
+  const panel = document.getElementById(`disc-result-${accountName}`);
+  let elapsed = 0;
+
+  const iv = setInterval(async () => {
+    elapsed += 3;
+    panel.innerHTML = `<span style="color:#64748b;font-size:0.82rem;">Buscando grupos... ${elapsed}s</span>`;
+
+    const { ok, data } = await api('GET', `/admin/api/discovery/${runId}`);
+    if (!ok) { clearInterval(iv); _resetDiscBtn(btn, row); return; }
+
+    if (data.status === 'done') {
+      clearInterval(iv);
+      _resetDiscBtn(btn, row);
+      toast(`✅ ${data.groups_found} grupos encontrados para ${accountName}`);
+      loadAccounts();
+      loadDiscoveryResultInline(accountName);
+    } else if (data.status === 'failed') {
+      clearInterval(iv);
+      _resetDiscBtn(btn, row);
+      panel.innerHTML = `<span style="color:#fca5a5;">❌ Error: ${data.error ?? 'desconocido'}</span>`;
+      toast(`❌ Error al buscar grupos`, true);
+    }
+  }, 3000);
+}
+
+function _resetDiscBtn(btn, row) {
+  btn.disabled = false;
+  btn.textContent = 'Consulta de Grupos';
+  row.classList.remove('running');
+}
+
+async function loadDiscoveryResultInline(accountName) {
+  const panel = document.getElementById(`disc-result-${accountName}`);
+  panel.style.display = 'block';
+  panel.innerHTML = '<span style="color:#64748b;font-size:0.82rem;">Cargando...</span>';
+
+  const { ok, data } = await api('GET', `/admin/api/accounts/${accountName}/discovered-groups`);
+  if (!ok) { panel.innerHTML = '<span style="color:#fca5a5;">Error al cargar</span>'; return; }
+
+  const { groups } = data;
+  const pending = groups.filter(g => !g.added_to_posting);
+  const added   = groups.filter(g =>  g.added_to_posting);
+
+  if (!groups.length) {
+    panel.innerHTML = '<span style="color:#64748b;font-size:0.82rem;">Sin grupos encontrados aún. Usa "Consulta de Grupos" para buscar.</span>';
+    return;
+  }
+
+  let html = '';
+
+  if (pending.length) {
+    html += `<p style="font-size:0.78rem;color:#94a3b8;margin-bottom:0.5rem;">
+               Encontrados — pendientes de añadir (${pending.length})</p>`;
+    pending.forEach(g => {
+      html += `<div class="disc-group-item">
+        <div><div class="disc-group-name">${g.group_name}</div>
+             <div class="disc-group-id">${g.group_id}</div></div>
+        <button class="btn btn-save btn-sm"
+          onclick="addDiscoveredGroupInline('${accountName}','${g.group_id}',this)">+ Añadir</button>
+      </div>`;
+    });
+  }
+
+  if (added.length) {
+    if (pending.length) html += '<div style="margin-top:0.6rem;"></div>';
+    html += `<p style="font-size:0.78rem;color:#64748b;margin-bottom:0.5rem;">
+               Ya añadidos a publicación (${added.length})</p>`;
+    added.forEach(g => {
+      html += `<div class="disc-group-item added">
+        <div><div class="disc-group-name">${g.group_name}</div>
+             <div class="disc-group-id">${g.group_id}</div></div>
+        <span style="font-size:0.75rem;color:#86efac;">✓ activo</span>
+      </div>`;
+    });
+  }
+
+  panel.innerHTML = html;
+}
+
+async function addDiscoveredGroupInline(accountName, groupId, btn) {
+  btn.disabled = true;
+  const { ok, data } = await api('POST', `/admin/api/accounts/${accountName}/discovered-groups/${groupId}/add`);
+  if (ok) {
+    toast('✅ Grupo añadido a publicaciones');
+    loadAccounts();
+    loadDiscoveryResultInline(accountName);
+  } else {
+    toast(`❌ ${data?.error ?? 'Error'}`, true);
+    btn.disabled = false;
   }
 }
 

@@ -314,9 +314,62 @@ def assign_proxy_to_account(account_name: str, account_groups: list[str]) -> str
     return best_node
 ```
 
+### Estado de implementación (2026-04-25)
+
+**Código:** ✅ Completo — `proxy_manager.py`, tablas DB, integración en `facebook_poster.py`, endpoints admin, health checker en `main.py`.
+
+**Hardware activo:**
+| # | Nodo | Status | IP SIM |
+|---|------|--------|--------|
+| 1 | `phone1_sim` — Teléfono 1 SIM | ✅ online | `189.203.61.165` |
+| 2 | `phone2_sim` — Teléfono 2 | ⏳ pendiente hardware | — |
+| 3 | `phone3_sim` — Teléfono 3 | ⏳ pendiente hardware | — |
+| 4 | `phone4_sim` — Teléfono 4 | ⏳ pendiente hardware | — |
+| 5 | `phone1_simB` — Teléfono 1 SIM B (dual) | ⏳ pendiente hardware | — |
+
+**Cuentas asignadas:** 5/5 → todas a `phone1_sim` (por ahora).
+
+> ⚠ Con un solo nodo todas las cuentas comparten IP. El riesgo de cluster-ban se reduce respecto a antes (IP móvil vs IP fija) pero no desaparece hasta tener al menos 2 nodos.
+
+---
+
+### 🔴 PRIORIDAD — Alta telefono 2, 3, 4
+
+**Setup de cada teléfono adicional:**
+
+```bash
+# Conectar el teléfono por USB, activar tethering + proxy app, luego:
+./setup_phone_proxy.sh --add
+```
+
+El script guiado hace todo: detecta la interfaz, verifica que use SIM (no WiFi), registra en DB y asigna cuentas.
+
+**Configuración mínima en el teléfono antes de ejecutar `--add`:**
+1. WiFi **desactivado** (crítico — si está activo, el proxy usará WiFi y la IP será la misma del servidor)
+2. Datos móviles **activos**
+3. App **Every Proxy** instalada y corriendo en SOCKS5 puerto 1080
+4. **USB tethering** activo: Ajustes → Conexiones → Zona Activa → Anclaje USB
+
+**Redistribución de cuentas cuando haya 2+ nodos:**
+```python
+# Ejecutar después de registrar cada nodo nuevo:
+import job_store, proxy_manager, json
+job_store.init_db()
+for c in job_store.list_accounts_full():
+    groups = json.loads(c.get("groups") or "[]")
+    # assign_proxy_to_account elige el nodo con menos solapamiento de grupos
+    proxy_manager.assign_proxy_to_account(c["name"], groups)
+```
+
+La función `assign_proxy_to_account` distribuye automáticamente: cuentas que publican en los mismos grupos de Facebook quedarán en nodos distintos.
+
+---
+
 ### Criterio de aceptación
-- [ ] 5 nodos configurados en DB, cada uno con IP verificada distinta.
-- [ ] `resolve_proxy()` retorna proxy correcto para cada cuenta.
+- [x] Código implementado: `proxy_manager.py`, tablas DB, integración browser, endpoints admin.
+- [x] 1 nodo configurado con IP SIM verificada distinta a la del servidor.
+- [x] `resolve_proxy()` retorna proxy correcto para cada cuenta.
+- [ ] 5 nodos configurados, cada uno con IP verificada distinta.
 - [ ] Desconectar teléfono → en < 6 min el nodo aparece como `offline` en `/admin`.
 - [ ] Job para cuenta sin proxy disponible queda `pending` y se reintenta automáticamente.
 - [ ] Reconectar teléfono → en < 4 min el nodo vuelve a `online` sin intervención manual.
@@ -324,6 +377,7 @@ def assign_proxy_to_account(account_name: str, account_groups: list[str]) -> str
 - [ ] Test: apagar 2 de 5 teléfonos → el sistema sigue publicando con los 3 restantes.
 
 ### Riesgos
+- **Teléfono con WiFi activo:** el proxy usará WiFi en lugar de SIM — misma IP que el servidor. Fix: desactivar WiFi en el teléfono. `setup_phone_proxy.sh` lo detecta automáticamente.
 - **Carrier cambia el rango de IP:** poco frecuente pero posible. El health checker detecta el cambio y actualiza `last_seen_ip`. No requiere intervención.
 - **Teléfono se queda sin batería:** igual que desconexión. Recomendación: conectar teléfonos a cargadores permanentemente.
 - **SIM dual: cambio automático entre SIMs:** configurar en Android que los datos usen SIM A o SIM B específicamente, no "automático". Así cada app proxy siempre sale por la SIM asignada.

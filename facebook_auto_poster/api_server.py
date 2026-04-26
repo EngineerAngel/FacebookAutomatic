@@ -20,6 +20,12 @@ Endpoints admin (requieren autenticación con ADMIN_KEY):
     GET    /admin/api/groups                → listar grupos + tags
     PUT    /admin/api/groups/<group_id>/tag → asignar tag a grupo
     GET    /admin/api/history               → historial de logins
+    GET    /admin/api/proxies               → listar nodos proxy + asignaciones
+    POST   /admin/api/proxies               → registrar nodo proxy
+    DELETE /admin/api/proxies/<id>          → eliminar nodo proxy
+    PUT    /admin/api/proxies/<id>/status   → cambiar status manualmente
+    POST   /admin/api/accounts/<name>/proxy → asignar proxy a cuenta
+    DELETE /admin/api/accounts/<name>/proxy → quitar proxy de cuenta
 """
 
 import json
@@ -41,6 +47,7 @@ from flask import (Flask, jsonify, redirect, render_template,
 from config import CONFIG, load_accounts
 from account_manager import AccountManager
 import job_store
+import proxy_manager
 import webhook
 from group_discoverer import discover_groups_for_account
 try:
@@ -967,6 +974,111 @@ def admin_clear_ban(name: str):
     if not ok:
         return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
     return jsonify({"ok": True, "account": name})
+
+
+@app.get("/admin/api/proxies")
+@admin_required
+def admin_list_proxies():
+    """Lista nodos proxy + asignaciones de cuentas."""
+    nodes = job_store.list_proxy_nodes()
+    assignments = job_store.list_proxy_assignments()
+    return jsonify({"nodes": nodes, "assignments": assignments})
+
+
+@app.post("/admin/api/proxies")
+@admin_required
+def admin_create_proxy():
+    """Registra un nuevo nodo proxy (teléfono SIM)."""
+    data = request.get_json(silent=True) or {}
+    node_id = (data.get("id") or "").strip()
+    label   = (data.get("label") or "").strip()
+    server  = (data.get("server") or "").strip()
+    notes   = (data.get("notes") or "").strip()
+
+    if not node_id or not label or not server:
+        return jsonify({"error": "Campos requeridos: id, label, server"}), 400
+
+    if not re.match(r'^[a-z0-9_]{1,40}$', node_id):
+        return jsonify({"error": "id debe ser [a-z0-9_]{1,40}"}), 400
+
+    if not server.startswith(("socks5://", "http://", "https://")):
+        return jsonify({"error": "server debe comenzar con socks5://, http:// o https://"}), 400
+
+    job_store.upsert_proxy_node(node_id, label, server, notes)
+    logger.info("Nodo proxy '%s' registrado: %s", node_id, server)
+    return jsonify({"ok": True, "id": node_id}), 201
+
+
+@app.delete("/admin/api/proxies/<node_id>")
+@admin_required
+def admin_delete_proxy(node_id: str):
+    """Elimina un nodo proxy."""
+    deleted = job_store.delete_proxy_node(node_id)
+    if not deleted:
+        return jsonify({"error": f"Nodo '{node_id}' no encontrado"}), 404
+    return "", 204
+
+
+@app.put("/admin/api/proxies/<node_id>/status")
+@admin_required
+def admin_set_proxy_status(node_id: str):
+    """Cambia el status de un nodo manualmente (maintenance, online, etc.)."""
+    data   = request.get_json(silent=True) or {}
+    status = (data.get("status") or "").strip()
+    if status not in ("online", "offline", "maintenance"):
+        return jsonify({"error": "status debe ser: online | offline | maintenance"}), 400
+    node = job_store.get_proxy_node(node_id)
+    if not node:
+        return jsonify({"error": f"Nodo '{node_id}' no encontrado"}), 404
+    job_store.update_proxy_node_status(node_id, status=status, reset_fails=(status == "online"))
+    return jsonify({"ok": True, "id": node_id, "status": status})
+
+
+@app.post("/admin/api/accounts/<name>/proxy")
+@admin_required
+def admin_assign_proxy(name: str):
+    """Asigna un proxy (manual) o ejecuta asignación automática a una cuenta."""
+    data      = request.get_json(silent=True) or {}
+    primary   = (data.get("primary_node") or "").strip() or None
+    secondary = (data.get("secondary_node") or "").strip() or None
+    auto      = data.get("auto", False)
+
+    accounts = job_store.list_accounts_full()
+    account  = next((a for a in accounts if a["name"] == name), None)
+    if not account:
+        return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
+
+    if auto:
+        try:
+            groups = json.loads(account.get("groups") or "[]")
+        except Exception:
+            groups = []
+        assigned = proxy_manager.assign_proxy_to_account(name, groups, secondary)
+        if not assigned:
+            return jsonify({"error": "Sin nodos disponibles para asignar"}), 409
+        return jsonify({"ok": True, "account": name, "primary_node": assigned})
+
+    if not primary:
+        return jsonify({"error": "Proveer 'primary_node' o usar 'auto': true"}), 400
+
+    if not job_store.get_proxy_node(primary):
+        return jsonify({"error": f"Nodo '{primary}' no existe"}), 400
+
+    if secondary and not job_store.get_proxy_node(secondary):
+        return jsonify({"error": f"Nodo secundario '{secondary}' no existe"}), 400
+
+    job_store.set_proxy_assignment(name, primary, secondary)
+    return jsonify({"ok": True, "account": name, "primary_node": primary, "secondary_node": secondary})
+
+
+@app.delete("/admin/api/accounts/<name>/proxy")
+@admin_required
+def admin_remove_proxy_assignment(name: str):
+    """Elimina la asignación de proxy de una cuenta."""
+    deleted = job_store.delete_proxy_assignment(name)
+    if not deleted:
+        return jsonify({"error": "Sin asignación para esta cuenta"}), 404
+    return "", 204
 
 
 @app.get("/admin/api/queue")
