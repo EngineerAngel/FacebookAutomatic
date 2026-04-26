@@ -13,21 +13,20 @@ Base de datos: jobs.db (local, gitignored, nunca expuesto por API)
 
 import json
 import sqlite3
-import threading
 import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent / "jobs.db"
-_lock = threading.Lock()
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -36,7 +35,7 @@ def _connect() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 def init_db() -> None:
     """Crea las tablas si no existen y aplica migraciones seguras."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS accounts (
                 name              TEXT PRIMARY KEY,
@@ -199,7 +198,7 @@ def upsert_accounts(accounts) -> int:
     Retorna el número de cuentas sincronizadas.
     """
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         for acc in accounts:
             conn.execute(
                 """INSERT INTO accounts (name, email, groups, created_at, is_active)
@@ -215,7 +214,7 @@ def upsert_accounts(accounts) -> int:
 
 def get_accounts_info() -> list[dict]:
     """Retorna metadatos de cuentas activas (para GET /accounts de OpenClaw)."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             """SELECT name, email, groups, last_login_at, last_published_at
                FROM accounts WHERE is_active=1"""
@@ -228,7 +227,7 @@ def get_accounts_info() -> list[dict]:
 # ---------------------------------------------------------------------------
 def list_accounts_full() -> list[dict]:
     """Lista completa de cuentas activas con todos sus campos."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             """SELECT name, email, groups, timezone, active_hours,
                       ban_cooldown_until, fingerprint_json, password_enc,
@@ -243,7 +242,7 @@ def create_account(name: str, email: str, groups: list[str],
                    fingerprint_json: str | None = None) -> None:
     """Crea una cuenta nueva o reactiva una eliminada."""
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             """INSERT INTO accounts (name, email, groups, fingerprint_json, created_at, is_active)
                VALUES (?, ?, ?, ?, ?, 1)
@@ -258,7 +257,7 @@ def create_account(name: str, email: str, groups: list[str],
 
 def save_fingerprint(account_name: str, fingerprint_json: str) -> None:
     """Persiste el fingerprint asignado a una cuenta."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             "UPDATE accounts SET fingerprint_json=? WHERE name=?",
             (fingerprint_json, account_name),
@@ -267,7 +266,7 @@ def save_fingerprint(account_name: str, fingerprint_json: str) -> None:
 
 def set_account_password(account_name: str, password_enc: str) -> None:
     """Guarda la contraseña cifrada con Fernet para una cuenta."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             "UPDATE accounts SET password_enc=? WHERE name=?",
             (password_enc, account_name),
@@ -276,7 +275,7 @@ def set_account_password(account_name: str, password_enc: str) -> None:
 
 def clear_account_password(account_name: str) -> None:
     """Elimina la contraseña individual — la cuenta usará FB_PASSWORD global."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             "UPDATE accounts SET password_enc=NULL WHERE name=?",
             (account_name,),
@@ -285,7 +284,7 @@ def clear_account_password(account_name: str) -> None:
 
 def update_account(name: str, email: str, groups: list[str]) -> bool:
     """Actualiza email y grupos de una cuenta. Retorna True si existía."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         cur = conn.execute(
             "UPDATE accounts SET email=?, groups=? WHERE name=? AND is_active=1",
             (email, json.dumps(groups), name),
@@ -300,7 +299,7 @@ def rename_account(old_name: str, new_name: str, email: str, groups: list[str]) 
     (incluyendo password_enc, fingerprint_json, ban_cooldown_until, etc.).
     Retorna True si old_name existía.
     """
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         exists = conn.execute(
             "SELECT 1 FROM accounts WHERE name=? AND is_active=1", (old_name,)
         ).fetchone()
@@ -319,7 +318,7 @@ def rename_account(old_name: str, new_name: str, email: str, groups: list[str]) 
 
 def delete_account(name: str) -> bool:
     """Soft-delete: marca is_active=0. Retorna True si existía."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         cur = conn.execute(
             "UPDATE accounts SET is_active=0 WHERE name=? AND is_active=1",
             (name,),
@@ -333,7 +332,7 @@ def delete_account(name: str) -> bool:
 def record_login(account_name: str, success: bool) -> None:
     """Registra un intento de login y actualiza last_login_at si fue exitoso."""
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             "INSERT INTO login_events (account_name, logged_in_at, success) VALUES (?,?,?)",
             (account_name, now, int(success)),
@@ -347,7 +346,7 @@ def record_login(account_name: str, success: bool) -> None:
 
 def get_recent_logins(limit: int = 50) -> list[dict]:
     """Retorna los últimos N eventos de login."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             """SELECT account_name, logged_in_at, success
                FROM login_events
@@ -367,7 +366,7 @@ def record_ban(
 ) -> int:
     """Registra un evento de ban. Retorna el id generado."""
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         cur = conn.execute(
             """INSERT INTO account_bans
                (account_name, detected_at, context, screenshot_path)
@@ -381,7 +380,7 @@ def set_account_ban_cooldown(account_name: str, hours: int) -> None:
     """Marca la cuenta en cooldown hasta now + hours."""
     from datetime import timedelta
     until = (datetime.now() + timedelta(hours=hours)).isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             "UPDATE accounts SET ban_cooldown_until=? WHERE name=?",
             (until, account_name),
@@ -390,7 +389,7 @@ def set_account_ban_cooldown(account_name: str, hours: int) -> None:
 
 def clear_ban(account_name: str) -> bool:
     """Levanta el cooldown y marca bans como reviewed. Retorna True si existía."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         cur = conn.execute(
             "UPDATE accounts SET ban_cooldown_until=NULL WHERE name=?",
             (account_name,),
@@ -405,7 +404,7 @@ def clear_ban(account_name: str) -> bool:
 def list_active_bans() -> list[dict]:
     """Lista cuentas actualmente en cooldown con tiempo restante."""
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             """SELECT name, ban_cooldown_until FROM accounts
                WHERE ban_cooldown_until IS NOT NULL
@@ -418,7 +417,7 @@ def list_active_bans() -> list[dict]:
 
 def list_recent_bans(limit: int = 50) -> list[dict]:
     """Lista los últimos N eventos de ban (incluye ya reviewed)."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             """SELECT id, account_name, detected_at, context,
                       screenshot_path, reviewed
@@ -432,7 +431,7 @@ def list_recent_bans(limit: int = 50) -> list[dict]:
 def is_account_in_cooldown(account_name: str) -> bool:
     """True si la cuenta tiene ban_cooldown_until > now."""
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         row = conn.execute(
             """SELECT 1 FROM accounts
                WHERE name=? AND ban_cooldown_until IS NOT NULL
@@ -452,7 +451,7 @@ def record_gemini_use(
 ) -> None:
     """Inserta un evento de uso de Gemini para esta cuenta."""
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             """INSERT INTO gemini_usage (account_name, used_at, group_id, success)
                VALUES (?,?,?,?)""",
@@ -462,7 +461,7 @@ def record_gemini_use(
 
 def count_gemini_uses_today(account_name: str) -> int:
     """Cuenta usos exitosos del día actual (zona local) para esta cuenta."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         row = conn.execute(
             """SELECT COUNT(*) AS n FROM gemini_usage
                WHERE account_name=?
@@ -478,7 +477,7 @@ def count_gemini_uses_today(account_name: str) -> int:
 # ---------------------------------------------------------------------------
 def get_group_tag(group_id: str) -> str:
     """Retorna el tag del grupo, o 'generico' si no tiene uno asignado."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         row = conn.execute(
             "SELECT tag FROM group_tags WHERE group_id=?", (group_id,)
         ).fetchone()
@@ -487,7 +486,7 @@ def get_group_tag(group_id: str) -> str:
 
 def set_group_tag(group_id: str, tag: str) -> None:
     """Asigna o actualiza el tag de un grupo."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             "INSERT INTO group_tags (group_id, tag) VALUES (?,?) "
             "ON CONFLICT(group_id) DO UPDATE SET tag = excluded.tag",
@@ -497,7 +496,7 @@ def set_group_tag(group_id: str, tag: str) -> None:
 
 def list_group_tags() -> list[dict]:
     """Lista todos los grupos con tags asignados."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             "SELECT group_id, tag FROM group_tags ORDER BY tag ASC"
         ).fetchall()
@@ -517,7 +516,7 @@ def create_job(
 ) -> str:
     """Inserta un nuevo job y retorna su id."""
     job_id = uuid.uuid4().hex[:12]
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             """INSERT INTO jobs
                (id, text, accounts, image_path, callback_url,
@@ -542,7 +541,7 @@ def create_job(
 # Transiciones de estado
 # ---------------------------------------------------------------------------
 def mark_running(job_id: str) -> None:
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             "UPDATE jobs SET status='running', started_at=? WHERE id=?",
             (datetime.now().isoformat(), job_id),
@@ -556,7 +555,7 @@ def mark_done(job_id: str, results: dict[str, dict[str, bool]]) -> None:
     Almacena group_tag (snapshot) y actualiza last_published_at.
     """
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             "UPDATE jobs SET status='done', finished_at=? WHERE id=?",
             (now, job_id),
@@ -581,7 +580,7 @@ def mark_done(job_id: str, results: dict[str, dict[str, bool]]) -> None:
 
 
 def mark_failed(job_id: str, error_msg: str = "") -> None:
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         # No sobreescribir si ya terminó correctamente
         conn.execute(
             "UPDATE jobs SET status='failed', finished_at=? WHERE id=? AND status NOT IN ('done','cancelled')",
@@ -596,7 +595,7 @@ def mark_failed(job_id: str, error_msg: str = "") -> None:
 
 def cancel_job(job_id: str) -> bool:
     """Cancela un job en estado pending. Retorna True si existía."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         cursor = conn.execute(
             "UPDATE jobs SET status='cancelled' WHERE id=? AND status='pending'",
             (job_id,),
@@ -611,7 +610,7 @@ def mark_running_as_interrupted() -> int:
     y durante graceful shutdown. Retorna el número de filas afectadas.
     """
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         cur = conn.execute(
             "UPDATE jobs SET status='interrupted', finished_at=? WHERE status='running'",
             (now,),
@@ -624,7 +623,7 @@ def mark_running_as_interrupted() -> int:
 # ---------------------------------------------------------------------------
 def count_pending_jobs() -> int:
     """Número de jobs en cola (pending o running)."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         row = conn.execute(
             "SELECT COUNT(*) AS n FROM jobs WHERE status IN ('pending','running')"
         ).fetchone()
@@ -634,7 +633,7 @@ def count_pending_jobs() -> int:
 def count_active_accounts() -> int:
     """Cuentas activas que NO están en cooldown de ban."""
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         row = conn.execute(
             """SELECT COUNT(*) AS n FROM accounts
                WHERE is_active=1
@@ -646,7 +645,7 @@ def count_active_accounts() -> int:
 
 def count_jobs_by_status() -> dict[str, int]:
     """Distribución de jobs por estado (para healthcheck detallado)."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             "SELECT status, COUNT(*) AS n FROM jobs GROUP BY status"
         ).fetchall()
@@ -661,7 +660,7 @@ def account_recent_post_count(account_name: str, window_minutes: int = 60) -> in
     """
     from datetime import timedelta
     cutoff = (datetime.now() - timedelta(minutes=window_minutes)).isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         row = conn.execute(
             """SELECT COUNT(*) AS n
                FROM job_results jr JOIN jobs j ON jr.job_id = j.id
@@ -680,13 +679,13 @@ def account_recent_post_count(account_name: str, window_minutes: int = 60) -> in
 def is_rate_limited(ip: str, endpoint: str, limit: int, window_s: int) -> bool:
     """Retorna True si ip+endpoint excedió `limit` hits en los últimos window_s.
 
-    Registra el hit actual si no está limitado, en operación atómica bajo _lock.
+    Registra el hit actual si no está limitado, en una sola transacción SQLite.
     Sobrevive a reinicios del servidor — los hits viejos se purgan en la misma
     llamada.
     """
     now = time.time()
     cutoff = now - window_s
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         # Purgar eventos viejos para este (ip, endpoint)
         conn.execute(
             "DELETE FROM rate_limit_events WHERE ip=? AND endpoint=? AND ts < ?",
@@ -709,7 +708,7 @@ def is_rate_limited(ip: str, endpoint: str, limit: int, window_s: int) -> bool:
 def purge_old_rate_limit_events(days: int = 7) -> int:
     """Elimina eventos más viejos que N días. Retorna filas eliminadas."""
     cutoff = time.time() - days * 86400
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         cur = conn.execute(
             "DELETE FROM rate_limit_events WHERE ts < ?",
             (cutoff,),
@@ -723,7 +722,7 @@ def purge_old_rate_limit_events(days: int = 7) -> int:
 def get_text_variation(cache_key: str, ttl_seconds: int) -> str | None:
     """Retorna el parafraseo cacheado si no ha expirado, None si miss/expirado."""
     cutoff = time.time() - ttl_seconds
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         row = conn.execute(
             """SELECT variated FROM text_variations
                WHERE cache_key=? AND created_at >= ?""",
@@ -734,7 +733,7 @@ def get_text_variation(cache_key: str, ttl_seconds: int) -> str | None:
 
 def save_text_variation(cache_key: str, original_hash: str, variated: str) -> None:
     """Guarda (o reemplaza) una variación cacheada."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             """INSERT INTO text_variations (cache_key, original_hash, variated, created_at)
                VALUES (?, ?, ?, ?)
@@ -749,7 +748,7 @@ def save_text_variation(cache_key: str, original_hash: str, variated: str) -> No
 def purge_old_text_variations(days: int = 7) -> int:
     """Elimina variaciones más viejas que N días. Retorna filas eliminadas."""
     cutoff = time.time() - days * 86400
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         cur = conn.execute(
             "DELETE FROM text_variations WHERE created_at < ?",
             (cutoff,),
@@ -765,7 +764,7 @@ def pop_due_scheduled(now: datetime) -> list[dict]:
     Retorna y marca como 'running' todos los scheduled jobs cuya hora ya pasó.
     Operación atómica para evitar doble disparo.
     """
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             """SELECT id, text, accounts, image_path, callback_url, scheduled_for
                FROM jobs
@@ -797,7 +796,7 @@ def pop_due_scheduled(now: datetime) -> list[dict]:
 # ---------------------------------------------------------------------------
 def get_recent_jobs(limit: int = 50) -> list[dict]:
     """Retorna los N jobs mas recientes con sus resultados resumidos."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             """SELECT id, type, status, accounts, scheduled_for,
                       created_at, started_at, finished_at
@@ -841,7 +840,7 @@ def get_recent_jobs(limit: int = 50) -> list[dict]:
 # ---------------------------------------------------------------------------
 def save_cookies(email: str, cookies: list) -> None:
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             """INSERT INTO account_cookies (email, cookies, updated_at)
                VALUES (?, ?, ?)
@@ -853,7 +852,7 @@ def save_cookies(email: str, cookies: list) -> None:
 
 
 def load_cookies(email: str) -> list | None:
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         row = conn.execute(
             "SELECT cookies FROM account_cookies WHERE email=?", (email,)
         ).fetchone()
@@ -861,7 +860,7 @@ def load_cookies(email: str) -> list | None:
 
 
 def delete_cookies(email: str) -> None:
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute("DELETE FROM account_cookies WHERE email=?", (email,))
 
 
@@ -870,7 +869,7 @@ def delete_cookies(email: str) -> None:
 # ---------------------------------------------------------------------------
 def list_pending_scheduled() -> list[dict]:
     """Lista jobs agendados aún pendientes (para GET /schedule)."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             """SELECT id, text, accounts, image_path, callback_url, scheduled_for, created_at
                FROM jobs WHERE type='scheduled' AND status='pending'
@@ -896,7 +895,7 @@ def list_pending_scheduled() -> list[dict]:
 def create_discovery_run(run_id: str, account_name: str) -> None:
     """Inicia un nuevo run de descubrimiento. Estado inicial: 'running'."""
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             """INSERT INTO discovery_runs (id, account_name, status, started_at)
                VALUES (?, ?, ?, ?)""",
@@ -907,7 +906,7 @@ def create_discovery_run(run_id: str, account_name: str) -> None:
 def finish_discovery_run(run_id: str, groups_found: int) -> None:
     """Marca un run como completado exitosamente."""
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             """UPDATE discovery_runs
                SET status='done', finished_at=?, groups_found=?
@@ -919,7 +918,7 @@ def finish_discovery_run(run_id: str, groups_found: int) -> None:
 def fail_discovery_run(run_id: str, error: str) -> None:
     """Marca un run como fallido con mensaje de error."""
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             """UPDATE discovery_runs
                SET status='failed', finished_at=?, error=?
@@ -930,7 +929,7 @@ def fail_discovery_run(run_id: str, error: str) -> None:
 
 def get_discovery_run(run_id: str) -> dict | None:
     """Obtiene el estado de un run de descubrimiento."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM discovery_runs WHERE id=?",
             (run_id,),
@@ -945,7 +944,7 @@ def upsert_discovered_group(
     discovered_at: str,
 ) -> None:
     """Guarda o actualiza un grupo descubierto. Si existe, actualiza last_seen."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             """INSERT INTO discovered_groups
                (account_name, group_id, group_name, discovered_at, last_seen)
@@ -960,7 +959,7 @@ def upsert_discovered_group(
 
 def list_discovered_groups(account_name: str) -> list[dict]:
     """Lista grupos descubiertos de una cuenta, pendientes primero."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             """SELECT group_id, group_name, discovered_at, added_to_posting, last_seen
                FROM discovered_groups
@@ -973,7 +972,7 @@ def list_discovered_groups(account_name: str) -> list[dict]:
 
 def mark_group_added_to_posting(account_name: str, group_id: str) -> bool:
     """Marca un grupo descubierto como añadido a la lista de publicación."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         cur = conn.execute(
             """UPDATE discovered_groups
                SET added_to_posting=1
@@ -995,7 +994,7 @@ def upsert_proxy_node(
 ) -> None:
     """Crea o actualiza un nodo proxy. No resetea status/ip si ya existe."""
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             """INSERT INTO proxy_nodes (id, label, server, notes, last_checked)
                VALUES (?, ?, ?, ?, ?)
@@ -1009,7 +1008,7 @@ def upsert_proxy_node(
 
 def list_proxy_nodes() -> list[dict]:
     """Lista todos los nodos proxy."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             """SELECT id, label, server, status, last_checked,
                       last_seen_ip, check_fail_count, notes
@@ -1020,7 +1019,7 @@ def list_proxy_nodes() -> list[dict]:
 
 def get_proxy_node(node_id: str) -> dict | None:
     """Devuelve un nodo proxy por ID, o None si no existe."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM proxy_nodes WHERE id=?", (node_id,)
         ).fetchone()
@@ -1037,7 +1036,7 @@ def update_proxy_node_status(
 ) -> None:
     """Actualiza status, IP pública y/o contadores de fallo de un nodo."""
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         parts = ["last_checked = ?"]
         params: list = [now]
 
@@ -1062,7 +1061,7 @@ def update_proxy_node_status(
 
 def delete_proxy_node(node_id: str) -> bool:
     """Elimina un nodo proxy. Retorna True si existía."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         cur = conn.execute("DELETE FROM proxy_nodes WHERE id=?", (node_id,))
         return cur.rowcount > 0
 
@@ -1070,7 +1069,7 @@ def delete_proxy_node(node_id: str) -> bool:
 def get_any_online_proxy_node(exclude_nodes: list[str | None]) -> dict | None:
     """Retorna cualquier nodo 'online' que no esté en la lista de exclusión."""
     clean = [n for n in exclude_nodes if n]
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         if clean:
             placeholders = ",".join("?" * len(clean))
             row = conn.execute(
@@ -1095,7 +1094,7 @@ def set_proxy_assignment(
 ) -> None:
     """Asigna (o reasigna) los nodos proxy de una cuenta."""
     now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         conn.execute(
             """INSERT INTO account_proxy_assignment
                    (account_name, primary_node, secondary_node, assigned_at)
@@ -1110,7 +1109,7 @@ def set_proxy_assignment(
 
 def get_proxy_assignment(account_name: str) -> dict | None:
     """Retorna la asignación de proxy de una cuenta, o None."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM account_proxy_assignment WHERE account_name=?",
             (account_name,),
@@ -1120,7 +1119,7 @@ def get_proxy_assignment(account_name: str) -> dict | None:
 
 def delete_proxy_assignment(account_name: str) -> bool:
     """Elimina la asignación de proxy de una cuenta."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         cur = conn.execute(
             "DELETE FROM account_proxy_assignment WHERE account_name=?",
             (account_name,),
@@ -1130,7 +1129,7 @@ def delete_proxy_assignment(account_name: str) -> bool:
 
 def get_accounts_for_node(node_id: str) -> list[dict]:
     """Retorna las cuentas asignadas a un nodo (primary o secondary)."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             """SELECT a.name, a.groups
                FROM accounts a
@@ -1143,7 +1142,7 @@ def get_accounts_for_node(node_id: str) -> list[dict]:
 
 def list_proxy_assignments() -> list[dict]:
     """Lista todas las asignaciones con info del nodo primario."""
-    with _lock, _connect() as conn:
+    with _connect() as conn:
         rows = conn.execute(
             """SELECT p.account_name, p.primary_node, p.secondary_node,
                       p.assigned_at, n.label, n.status, n.last_seen_ip

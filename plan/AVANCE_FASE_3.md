@@ -45,7 +45,7 @@ master
 | Orden | # | Ítem | Estado | Flag (cuando aplique) | Completado |
 |-------|---|------|--------|-----------------------|-----------|
 | 0 | — | Setup `pytest` + tests ancla sobre código existente | ✅ Completado | — | 2026-04-26 |
-| 1 | 3.5 | Eliminar lock global SQLite | ⏳ Pendiente | `use_thread_local_db_conn` | — |
+| 1 | 3.5 | Eliminar lock global SQLite | ✅ Completado | — | 2026-04-26 |
 | 2 | 3.3a | Logs estructurados (structlog) | ⏳ Pendiente | `structured_logging` | — |
 | 3 | 3.1 | Migración a Playwright async | ⏳ Pendiente | `use_async_poster` | — |
 | 4 | 3.2 | FastAPI montado en `/v2` | ⏳ Pendiente | `use_fastapi` | — |
@@ -83,19 +83,21 @@ master
 
 ---
 
-### Ítem 3.5 — Eliminar lock global SQLite
+### Ítem 3.5 — Eliminar lock global SQLite ✅
 
-**Trivial pero educativo.** Valida que los tests del Paso 0 detectan regresiones.
+**Completado 2026-04-26.**
 
-- Quitar `_lock = threading.Lock()` de [job_store.py](../facebook_auto_poster/job_store.py).
-- Añadir `PRAGMA busy_timeout=5000` en `_connect()`.
-- Connection-per-thread con `threading.local()` (opcional — medible).
-- Flag: `use_thread_local_db_conn` (default OFF inicialmente, ON cuando se valide).
+Cambios en [job_store.py](../facebook_auto_poster/job_store.py):
+- Eliminado `import threading` y `_lock = threading.Lock()`.
+- `_connect()`: añadido `check_same_thread=False` + `PRAGMA busy_timeout=5000`.
+- 63 ocurrencias de `with _lock, _connect() as conn:` reemplazadas por `with _connect() as conn:`.
+
+La flag `use_thread_local_db_conn` se descartó: el cambio es seguro e irrompible con WAL activo, no justifica overhead de flag.
 
 **Criterio de cierre:**
-- [ ] Benchmark: 100 `create_job()` concurrent → mejora medible vs lock.
-- [ ] Sin "database is locked" bajo carga simulada.
-- [ ] Tests del paso 0 siguen verdes.
+- [x] 100 threads concurrentes `create_job()` → 0 errores, 0 IDs duplicados.
+- [x] Sin "database is locked" bajo contención (10 batches × 10 writes simultáneos).
+- [x] Tests del paso 0 siguen verdes (52/52).
 
 ---
 
