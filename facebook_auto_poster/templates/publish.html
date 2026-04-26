@@ -551,7 +551,24 @@ async function loadTemplates() {
   const gallery = document.getElementById('templates-gallery');
   try {
     const res = await fetch('/admin/api/templates');
+
+    if (!res.ok) {
+      let errorMsg = `HTTP ${res.status}`;
+      try {
+        const errData = await res.json();
+        errorMsg = errData.error || errorMsg;
+      } catch {
+        // Si no es JSON, usar el status
+      }
+      throw new Error(errorMsg);
+    }
+
     const templates = await res.json();
+
+    if (!Array.isArray(templates)) {
+      throw new Error('Respuesta inválida del servidor (no es array)');
+    }
+
     state.allTemplates = templates;
 
     if (templates.length === 0) {
@@ -560,30 +577,46 @@ async function loadTemplates() {
     }
 
     gallery.innerHTML = '';
-    templates.forEach(tpl => {
+    templates.forEach((tpl, idx) => {
+      if (!tpl.id || !tpl.name) {
+        console.error(`Plantilla #${idx} con datos incompletos:`, tpl);
+        return;
+      }
+
       const card = document.createElement('div');
       card.className = 'template-card';
       card.innerHTML = `
         <div class="template-name">${escapeHtml(tpl.name)}</div>
-        <div class="template-preview">${escapeHtml(tpl.text.substring(0, 100))}</div>
+        <div class="template-preview">${escapeHtml((tpl.text || '').substring(0, 100))}</div>
         <div class="template-actions">
-          <button class="btn btn-secondary btn-sm" onclick="showTemplatePreview('${tpl.id}')">Vista previa</button>
-          <button class="btn btn-secondary btn-sm" onclick="prepareDeleteTemplate('${tpl.id}','${tpl.name}')">Eliminar</button>
+          <button class="btn btn-secondary btn-sm" onclick="showTemplatePreview('${escapeHtml(tpl.id)}')">Vista previa</button>
+          <button class="btn btn-secondary btn-sm" onclick="prepareDeleteTemplate('${escapeHtml(tpl.id)}','${escapeHtml(tpl.name)}')">Eliminar</button>
         </div>
       `;
       card.onclick = () => selectTemplate(tpl.id);
       gallery.appendChild(card);
     });
   } catch (err) {
-    gallery.innerHTML = '<div style="grid-column:1/-1;color:#fca5a5">Error al cargar plantillas</div>';
+    console.error('Error cargando plantillas:', err);
+    gallery.innerHTML = `<div style="grid-column:1/-1;color:#fca5a5">Error: ${escapeHtml(err.message)}</div>`;
   }
 }
 
 function selectTemplate(tplId) {
   state.selectedTemplate = state.allTemplates.find(t => t.id === tplId);
-  document.querySelectorAll('.template-card').forEach(c => c.classList.remove('selected'));
-  event.currentTarget.classList.add('selected');
-  showStatus('templates-status', 'Plantilla seleccionada: ' + state.selectedTemplate.name, 'info');
+
+  document.querySelectorAll('.template-card').forEach((card, idx) => {
+    const cardData = state.allTemplates[idx];
+    if (cardData && cardData.id === tplId) {
+      card.classList.add('selected');
+    } else {
+      card.classList.remove('selected');
+    }
+  });
+
+  if (state.selectedTemplate) {
+    showStatus('templates-status', 'Plantilla seleccionada: ' + escapeHtml(state.selectedTemplate.name), 'info');
+  }
 }
 
 function showTemplatePreview(tplId) {
@@ -593,10 +626,71 @@ function showTemplatePreview(tplId) {
   const modal = document.getElementById('template-preview-modal');
   document.getElementById('preview-modal-title').textContent = tpl.name;
   const body = document.getElementById('preview-modal-body');
-  let html = `<div style="margin-bottom:1rem"><strong>Texto:</strong><br><pre style="white-space:pre-wrap;color:#94a3b8">${escapeHtml(tpl.text)}</pre></div>`;
-  if (tpl.url) html += `<div style="margin-bottom:1rem"><strong>URL:</strong><br><code style="color:#94a3b8">${escapeHtml(tpl.url)}</code></div>`;
-  if (tpl.image_path) html += `<div style="margin-bottom:1rem"><strong>Imagen:</strong><br><img src="${escapeHtml(tpl.image_path)}" style="max-width:100%;border-radius:6px"></div>`;
-  body.innerHTML = html;
+
+  body.innerHTML = '';
+
+  // Sección TEXTO — Usando createElement
+  if (tpl.text) {
+    const textDiv = document.createElement('div');
+    textDiv.style.marginBottom = '1rem';
+
+    const textLabel = document.createElement('strong');
+    textLabel.textContent = 'Texto:';
+    textDiv.appendChild(textLabel);
+    textDiv.appendChild(document.createElement('br'));
+
+    const textPre = document.createElement('pre');
+    textPre.style.whiteSpace = 'pre-wrap';
+    textPre.style.color = '#94a3b8';
+    textPre.textContent = tpl.text;
+    textDiv.appendChild(textPre);
+    body.appendChild(textDiv);
+  }
+
+  // Sección URL — Usando createElement
+  if (tpl.url && typeof tpl.url === 'string' && tpl.url.length > 0) {
+    const urlDiv = document.createElement('div');
+    urlDiv.style.marginBottom = '1rem';
+
+    const urlLabel = document.createElement('strong');
+    urlLabel.textContent = 'URL:';
+    urlDiv.appendChild(urlLabel);
+    urlDiv.appendChild(document.createElement('br'));
+
+    const urlCode = document.createElement('code');
+    urlCode.style.color = '#94a3b8';
+    urlCode.textContent = tpl.url;
+    urlDiv.appendChild(urlCode);
+    body.appendChild(urlDiv);
+  }
+
+  // Sección IMAGEN — VALIDAR ORIGEN
+  if (tpl.image_path && typeof tpl.image_path === 'string' && tpl.image_path.startsWith('/')) {
+    const imgDiv = document.createElement('div');
+    imgDiv.style.marginBottom = '1rem';
+
+    const imgLabel = document.createElement('strong');
+    imgLabel.textContent = 'Imagen:';
+    imgDiv.appendChild(imgLabel);
+    imgDiv.appendChild(document.createElement('br'));
+
+    const img = document.createElement('img');
+    img.src = tpl.image_path;
+    img.style.maxWidth = '100%';
+    img.style.borderRadius = '6px';
+    img.style.maxHeight = '400px';
+
+    img.onerror = () => {
+      img.style.display = 'none';
+      const errMsg = document.createElement('p');
+      errMsg.style.color = '#fca5a5';
+      errMsg.textContent = '(imagen no disponible)';
+      imgDiv.appendChild(errMsg);
+    };
+
+    imgDiv.appendChild(img);
+    body.appendChild(imgDiv);
+  }
 
   modal.classList.add('active');
   state._previewTemplateId = tplId;
@@ -813,8 +907,27 @@ async function publish() {
     return;
   }
 
+  // NUEVA VALIDACIÓN: scheduled_for obligatorio si es scheduled
+  if (state.publishWhen === 'scheduled') {
+    if (!state.publishDatetime || state.publishDatetime.trim() === '') {
+      showStatus('confirm-status', 'Selecciona fecha y hora para publicación programada', 'error');
+      return;
+    }
+    const scheduled = new Date(state.publishDatetime);
+    const now = new Date();
+    if (isNaN(scheduled.getTime())) {
+      showStatus('confirm-status', 'Fecha inválida', 'error');
+      return;
+    }
+    if (scheduled <= now) {
+      showStatus('confirm-status', 'La fecha y hora deben ser en el futuro', 'error');
+      return;
+    }
+  }
+
   const btn = document.getElementById('publish-btn');
   btn.disabled = true;
+  showStatus('confirm-status', 'Publicando…', 'info');
 
   const fd = new FormData();
   fd.append('text', state.selectedTemplate.text);
@@ -832,17 +945,35 @@ async function publish() {
   try {
     const endpoint = state.publishWhen === 'scheduled' ? '/admin/api/schedule' : '/admin/api/post';
     const res = await fetch(endpoint, { method: 'POST', body: fd });
-    const data = await res.json();
 
-    if (res.ok) {
-      showStatus('confirm-status', 'Publicado exitosamente. Job ID: ' + data.job_id, 'ok');
-      loadScheduled();
-      resetForm();
-    } else {
-      showStatus('confirm-status', 'Error: ' + (data.error || 'Desconocido'), 'error');
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: 'Error desconocido' }));
+      showStatus('confirm-status', 'Error: ' + (data.error || `HTTP ${res.status}`), 'error');
+      return;  // NO resetear si hay error
     }
-  } catch {
-    showStatus('confirm-status', 'Error de conexión', 'error');
+
+    const data = await res.json();
+    if (!data.job_id) {
+      showStatus('confirm-status', 'Respuesta inválida del servidor', 'error');
+      return;
+    }
+
+    showStatus('confirm-status', 'Publicado exitosamente. Job ID: ' + data.job_id, 'ok');
+
+    // Recargar listas
+    try {
+      await loadScheduled();
+    } catch (e) {
+      console.error('Error recargando jobs:', e);
+    }
+
+    // Solo resetear si todo fue bien
+    resetForm();
+    switchWorkflow('templates');  // Volver al inicio
+
+  } catch (err) {
+    console.error('Error publicando:', err);
+    showStatus('confirm-status', 'Error de conexión: ' + err.message, 'error');
   } finally {
     btn.disabled = false;
   }

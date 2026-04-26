@@ -1222,6 +1222,19 @@ def admin_cancel_schedule(job_id: str):
 # ADMIN API — Plantillas de publicación
 # ===========================================================================
 
+# Límites de validación
+MAX_TEMPLATE_TEXT_CHARS = 50000  # 50 KB de texto
+MAX_TEMPLATE_NAME_CHARS = 100
+MIN_TEMPLATE_TEXT_CHARS = 10
+MAX_TEMPLATE_URL_CHARS = 2048
+
+_TEMPLATE_ID_PATTERN = re.compile(r'^[a-f0-9]{12}$')
+
+def _validate_template_id(template_id: str) -> bool:
+    """Valida que template_id sea UUID corto válido."""
+    return bool(_TEMPLATE_ID_PATTERN.match(template_id))
+
+
 @app.get("/admin/api/templates")
 @admin_required
 def admin_list_templates():
@@ -1241,12 +1254,22 @@ def admin_create_template():
     image_path = (data.get("image_path") or "").strip() or None
 
     # Validaciones
-    if not name or len(name) < 2 or len(name) > 100:
-        return jsonify({"error": "El nombre debe tener entre 2 y 100 caracteres"}), 400
-    if not text or len(text) < 10:
-        return jsonify({"error": "El texto debe tener al menos 10 caracteres"}), 400
+    if not name or len(name) < 2 or len(name) > MAX_TEMPLATE_NAME_CHARS:
+        return jsonify({"error": f"El nombre debe tener entre 2 y {MAX_TEMPLATE_NAME_CHARS} caracteres"}), 400
+    if not text or len(text) < MIN_TEMPLATE_TEXT_CHARS:
+        return jsonify({
+            "error": f"El texto debe tener entre {MIN_TEMPLATE_TEXT_CHARS} y {MAX_TEMPLATE_TEXT_CHARS} caracteres"
+        }), 400
+    if len(text) > MAX_TEMPLATE_TEXT_CHARS:
+        return jsonify({
+            "error": f"El texto no puede exceder {MAX_TEMPLATE_TEXT_CHARS} caracteres"
+        }), 400
     if not url:
         return jsonify({"error": "La URL es obligatoria"}), 400
+    if len(url) > MAX_TEMPLATE_URL_CHARS:
+        return jsonify({
+            "error": f"La URL no puede exceder {MAX_TEMPLATE_URL_CHARS} caracteres"
+        }), 400
 
     # Validar que image_path es seguro si se proporciona
     if image_path:
@@ -1266,7 +1289,8 @@ def admin_create_template():
     except sqlite3.IntegrityError:
         return jsonify({"error": f"Ya existe una plantilla con el nombre '{name}'"}), 409
     except Exception as exc:
-        logger.error("Error creando plantilla: %s", exc)
+        logger.exception("Error creando plantilla (nombre='%s', url='%s'): %s",
+                        name, url, exc)
         return jsonify({"error": "Error interno al crear plantilla"}), 500
 
 
@@ -1274,9 +1298,12 @@ def admin_create_template():
 @admin_required
 def admin_get_template(template_id: str):
     """Obtiene los detalles de una plantilla específica."""
+    if not _validate_template_id(template_id):
+        return jsonify({"error": "ID de plantilla inválido"}), 400
+
     template = job_store.get_template(template_id)
     if not template:
-        return jsonify({"error": f"Plantilla '{template_id}' no encontrada"}), 404
+        return jsonify({"error": "Plantilla no encontrada"}), 404
     return jsonify(template), 200
 
 
@@ -1284,9 +1311,12 @@ def admin_get_template(template_id: str):
 @admin_required
 def admin_update_template(template_id: str):
     """Actualiza una plantilla existente."""
+    if not _validate_template_id(template_id):
+        return jsonify({"error": "ID de plantilla inválido"}), 400
+
     template = job_store.get_template(template_id)
     if not template:
-        return jsonify({"error": f"Plantilla '{template_id}' no encontrada"}), 404
+        return jsonify({"error": "Plantilla no encontrada"}), 404
 
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip() or None
@@ -1295,12 +1325,22 @@ def admin_update_template(template_id: str):
     image_path = (data.get("image_path") or "").strip() or None
 
     # Validaciones si se proporcionan
-    if name is not None and (len(name) < 2 or len(name) > 100):
-        return jsonify({"error": "El nombre debe tener entre 2 y 100 caracteres"}), 400
-    if text is not None and len(text) < 10:
-        return jsonify({"error": "El texto debe tener al menos 10 caracteres"}), 400
-    if url is not None and not url:
-        return jsonify({"error": "La URL no puede estar vacía"}), 400
+    if name is not None and (len(name) < 2 or len(name) > MAX_TEMPLATE_NAME_CHARS):
+        return jsonify({
+            "error": f"El nombre debe tener entre 2 y {MAX_TEMPLATE_NAME_CHARS} caracteres"
+        }), 400
+    if text is not None:
+        if len(text) < MIN_TEMPLATE_TEXT_CHARS or len(text) > MAX_TEMPLATE_TEXT_CHARS:
+            return jsonify({
+                "error": f"El texto debe tener entre {MIN_TEMPLATE_TEXT_CHARS} y {MAX_TEMPLATE_TEXT_CHARS} caracteres"
+            }), 400
+    if url is not None:
+        if not url:
+            return jsonify({"error": "La URL no puede estar vacía"}), 400
+        if len(url) > MAX_TEMPLATE_URL_CHARS:
+            return jsonify({
+                "error": f"La URL no puede exceder {MAX_TEMPLATE_URL_CHARS} caracteres"
+            }), 400
 
     # Validar image_path si se proporciona
     if image_path:
@@ -1316,12 +1356,15 @@ def admin_update_template(template_id: str):
             return jsonify({"status": "updated", "id": template_id}), 200
         else:
             return jsonify({"error": "No hay campos para actualizar"}), 400
-    except sqlite3.IntegrityError:
-        if name:
+    except sqlite3.IntegrityError as e:
+        error_str = str(e).lower()
+        if 'unique constraint failed: templates.name' in error_str or 'name' in error_str:
             return jsonify({"error": f"Ya existe una plantilla con el nombre '{name}'"}), 409
-        raise
+        else:
+            logger.exception("IntegrityError desconocido en update_template:")
+            return jsonify({"error": "Violación de restricción de datos"}), 409
     except Exception as exc:
-        logger.error("Error actualizando plantilla: %s", exc)
+        logger.exception("Error actualizando plantilla (id='%s'):", template_id)
         return jsonify({"error": "Error interno al actualizar plantilla"}), 500
 
 
@@ -1329,8 +1372,11 @@ def admin_update_template(template_id: str):
 @admin_required
 def admin_delete_template(template_id: str):
     """Elimina una plantilla."""
+    if not _validate_template_id(template_id):
+        return jsonify({"error": "ID de plantilla inválido"}), 400
+
     deleted = job_store.delete_template(template_id)
     if deleted:
         logger.info("Plantilla '%s' eliminada via admin", template_id)
         return "", 204
-    return jsonify({"error": f"Plantilla '{template_id}' no encontrada"}), 404
+    return jsonify({"error": "Plantilla no encontrada"}), 404
