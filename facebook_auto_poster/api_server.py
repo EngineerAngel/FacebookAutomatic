@@ -1068,13 +1068,23 @@ def admin_assign_proxy(name: str):
         return jsonify({"error": "Proveer 'primary_node' o usar 'auto': true"}), 400
 
     if not job_store.get_proxy_node(primary):
-        return jsonify({"error": f"Nodo '{primary}' no existe"}), 400
+        return jsonify({"error": f"Nodo primario '{primary}' no existe"}), 404
 
     if secondary and not job_store.get_proxy_node(secondary):
-        return jsonify({"error": f"Nodo secundario '{secondary}' no existe"}), 400
+        return jsonify({"error": f"Nodo secundario '{secondary}' no existe"}), 404
 
-    job_store.set_proxy_assignment(name, primary, secondary)
-    return jsonify({"ok": True, "account": name, "primary_node": primary, "secondary_node": secondary})
+    try:
+        job_store.set_proxy_assignment(name, primary, secondary)
+        logger.info("Proxy asignado manualmente a '%s': primario=%s", name, primary)
+        return jsonify({
+            "ok": True,
+            "account": name,
+            "primary_node": primary,
+            "secondary_node": secondary
+        }), 200
+    except Exception as e:
+        logger.exception("Error asignando proxy a '%s':", name)
+        return jsonify({"error": "Error en base de datos"}), 500
 
 
 @app.delete("/admin/api/accounts/<name>/proxy")

@@ -9,6 +9,7 @@ import json
 import logging
 import threading
 import time
+from datetime import datetime
 
 import requests
 
@@ -21,6 +22,11 @@ FAIL_THRESHOLD   = 3     # 3 fallos consecutivos → offline
 
 _started = False
 _lock    = threading.Lock()
+_assign_lock = threading.Lock()
+
+# Cache de proxies asignados (TTL 30s)
+_proxy_cache: dict[str, tuple[dict, float]] = {}
+_PROXY_CACHE_TTL_S = 30
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +34,7 @@ _lock    = threading.Lock()
 # ---------------------------------------------------------------------------
 
 def _check_node(node: dict) -> tuple[bool, str]:
-    """Verifica conectividad del nodo. Retorna (ok, ip_publica)."""
+    """Verifica conectividad del nodo con validaciones robustas. Retorna (ok, ip_publica)."""
     server = node["server"]
     try:
         proxies = {"http": server, "https": server}
@@ -37,12 +43,33 @@ def _check_node(node: dict) -> tuple[bool, str]:
             proxies=proxies,
             timeout=10,
         )
-        if resp.status_code == 200:
-            ip = resp.json().get("ip", "")
+
+        # Validar status HTTP
+        if resp.status_code != 200:
+            logger.debug("[ProxyCheck] %s retornó HTTP %d", node["id"], resp.status_code)
+            return False, ""
+
+        # Validar que sea JSON válido
+        try:
+            data = resp.json()
+            ip = data.get("ip", "")
+            if not ip:
+                logger.debug("[ProxyCheck] %s sin IP en respuesta", node["id"])
+                return False, ""
             return True, ip
+        except Exception as json_err:
+            logger.warning("[ProxyCheck] %s respuesta no es JSON: %s", node["id"], json_err)
+            return False, ""
+
+    except requests.Timeout:
+        logger.debug("[ProxyCheck] %s timeout (10s)", node["id"])
+        return False, ""
+    except requests.ConnectionError:
+        logger.debug("[ProxyCheck] %s error de conexión", node["id"])
+        return False, ""
     except Exception as exc:
-        logger.debug("[ProxyCheck] %s falló: %s", node["id"], exc)
-    return False, ""
+        logger.exception("[ProxyCheck] %s error inesperado", node["id"])
+        return False, ""
 
 
 def _run_health_checker() -> None:
@@ -84,13 +111,26 @@ def _run_health_checker() -> None:
 
 
 def _alert_node_down(node: dict) -> None:
-    """Log crítico + lista de cuentas afectadas cuando un nodo cae."""
-    accounts = job_store.get_accounts_for_node(node["id"])
-    names = [a["name"] for a in accounts]
+    """Log crítico + guardar alerta en BD para dashboard."""
+    try:
+        accounts = job_store.get_accounts_for_node(node["id"])
+        names = [a["name"] for a in accounts]
+    except Exception as e:
+        logger.error("Error obteniendo cuentas para nodo %s: %s", node["id"], e)
+        names = []
+
     logger.critical(
         "[ALERTA] Proxy caído: %s (%s) — cuentas afectadas: %s",
-        node["label"], node["server"], names,
+        node["label"], node["server"], ", ".join(names) if names else "ninguna",
     )
+
+    # Guardar en BD si existe tabla de alertas
+    try:
+        if names:
+            alert_msg = f"Nodo proxy {node['label']} offline. Cuentas: {', '.join(names)}"
+            job_store.create_system_alert(alert_msg, severity="critical")
+    except Exception as e:
+        logger.debug("Error creando alerta (puede no existir tabla): %s", e)
 
 
 def start() -> None:
@@ -112,16 +152,25 @@ def start() -> None:
 # Resolución de proxy para una cuenta
 # ---------------------------------------------------------------------------
 
-def resolve_proxy(account_name: str) -> dict | None:
+def resolve_proxy(account_name: str, force_refresh: bool = False) -> dict | None:
     """
-    Retorna el dict de proxy para Playwright: {"server": "socks5://..."}.
+    Retorna dict proxy con validación reciente.
 
     Prioridad:
-    1. Nodo primario asignado si está online.
-    2. Nodo secundario si el primario está offline.
-    3. Cualquier nodo online como emergencia (riesgo aceptable temporal).
-    4. None → sin proxy disponible (caller decide si reintentar o continuar sin proxy).
+    1. Cache (si TTL válido)
+    2. Nodo primario si está online
+    3. Nodo secundario si primario está offline
+    4. Fallback de emergencia (cualquier nodo online)
+    5. None si sin nodos disponibles
     """
+    now = time.time()
+
+    # Usar cache si es reciente
+    if not force_refresh and account_name in _proxy_cache:
+        proxy, ts = _proxy_cache[account_name]
+        if now - ts < _PROXY_CACHE_TTL_S:
+            return proxy
+
     assignment = job_store.get_proxy_assignment(account_name)
     if not assignment:
         logger.debug("[Proxy] Sin asignación para '%s'", account_name)
@@ -134,21 +183,37 @@ def resolve_proxy(account_name: str) -> dict | None:
             continue
         node = job_store.get_proxy_node(node_id)
         if node and node["status"] == "online":
+            # Validación: ¿health checker lo vio online hace poco?
+            last_checked = node.get("last_checked")
+            if last_checked:
+                try:
+                    last_ts = datetime.fromisoformat(last_checked).timestamp()
+                    if now - last_ts > 180:  # > 3 minutos, validar rápido
+                        ok, ip = _check_node(node)
+                        if not ok:
+                            logger.warning("[Proxy] %s offline (validación rápida)", node_id)
+                            continue
+                except Exception:
+                    pass  # Usar valor del DB si hay error en parsing
+
+            proxy = {"server": node["server"]}
+            _proxy_cache[account_name] = (proxy, now)
             logger.info(
                 "[Proxy] '%s' → nodo %s (%s)",
                 account_name, node_id, node.get("last_seen_ip", "?"),
             )
-            return {"server": node["server"]}
+            return proxy
 
-    # Emergencia: cualquier nodo online
+    # Fallback de emergencia
     fallback = job_store.get_any_online_proxy_node(exclude_nodes=candidates)
     if fallback:
         logger.warning(
-            "[Proxy] '%s' usando fallback de emergencia: %s — "
-            "cuentas de distintos grupos compartirán IP temporalmente",
+            "[Proxy] '%s' fallback → %s (IP compartida temporalmente)",
             account_name, fallback["id"],
         )
-        return {"server": fallback["server"]}
+        proxy = {"server": fallback["server"]}
+        _proxy_cache[account_name] = (proxy, now)
+        return proxy
 
     logger.error("[Proxy] Sin nodos disponibles para '%s'", account_name)
     return None
@@ -164,42 +229,52 @@ def assign_proxy_to_account(
     secondary_node: str | None = None,
 ) -> str | None:
     """
-    Asigna el nodo con menos cuentas que no comparta grupos con esta cuenta.
-    Retorna el node_id asignado, o None si no hay nodos disponibles.
+    Asigna proxy con transacción atómica (lock).
+    Asigna el nodo con menos cuentas que no comparta grupos.
+    Retorna node_id asignado, o None si sin nodos disponibles.
     """
-    nodes = job_store.list_proxy_nodes()
-    if not nodes:
-        logger.warning("[Proxy] No hay nodos en el pool para asignar a '%s'", account_name)
-        return None
+    with _assign_lock:
+        nodes = job_store.list_proxy_nodes()
+        if not nodes:
+            logger.warning("[Proxy] Sin nodos en pool para asignar a '%s'", account_name)
+            return None
 
-    best_node: str | None = None
-    best_score: float = float("inf")
+        # Validar que secondary_node exista
+        if secondary_node:
+            if not job_store.get_proxy_node(secondary_node):
+                logger.error("[Proxy] Nodo secundario '%s' no existe", secondary_node)
+                secondary_node = None
 
-    for node in nodes:
-        if node["status"] == "offline":
-            continue
-        existing = job_store.get_accounts_for_node(node["id"])
-        existing_groups: set[str] = set()
-        for acc in existing:
-            try:
-                groups = json.loads(acc.get("groups") or "[]")
-                existing_groups.update(groups)
-            except Exception:
-                pass
+        best_node: str | None = None
+        best_score: float = float("inf")
 
-        overlap = len(set(account_groups) & existing_groups)
-        count   = len(existing)
-        # Penalizar fuertemente el solapamiento de grupos con el mismo nodo
-        score = overlap * 100 + count
-        if score < best_score:
-            best_score = score
-            best_node  = node["id"]
+        for node in nodes:
+            if node["status"] == "offline":
+                continue
+            existing = job_store.get_accounts_for_node(node["id"])
+            existing_groups: set[str] = set()
+            for acc in existing:
+                try:
+                    groups = json.loads(acc.get("groups") or "[]")
+                    existing_groups.update(groups)
+                except Exception:
+                    pass
 
-    if best_node:
-        job_store.set_proxy_assignment(account_name, best_node, secondary_node)
-        logger.info(
-            "[Proxy] '%s' asignado a nodo %s (score=%.0f)",
-            account_name, best_node, best_score,
-        )
+            overlap = len(set(account_groups) & existing_groups)
+            count   = len(existing)
+            # Penalizar fuertemente el solapamiento de grupos con el mismo nodo
+            score = overlap * 100 + count
+            if score < best_score:
+                best_score = score
+                best_node  = node["id"]
 
-    return best_node
+        if best_node:
+            job_store.set_proxy_assignment(account_name, best_node, secondary_node)
+            logger.info(
+                "[Proxy] '%s' asignado a %s (score=%.0f)",
+                account_name, best_node, best_score,
+            )
+            return best_node
+
+    logger.error("[Proxy] Sin nodos disponibles para asignar a '%s'", account_name)
+    return None

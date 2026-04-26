@@ -60,16 +60,49 @@ _CF_TUNNEL_NAME = "fb-autoposter"
 _NGROK_CONFIG   = Path.home() / ".config" / "ngrok" / "ngrok.yml"
 
 
-def _static_tunnel_configured() -> bool:
-    return _URL_FILE.exists() and _BACKEND_FILE.exists()
+def _read_static_url() -> str | None:
+    """Lee URL del tunnel o None si no existe/está vacía."""
+    if not _URL_FILE.exists():
+        main_logger.warning("[Tunnel] Archivo de URL no existe: %s", _URL_FILE)
+        return None
+
+    url = _URL_FILE.read_text().strip()
+    if not url:
+        main_logger.error("[Tunnel] Archivo %s existe pero está vacío", _URL_FILE)
+        return None
+
+    if not url.startswith(("http://", "https://")):
+        main_logger.error("[Tunnel] URL inválida en %s: %s", _URL_FILE, url)
+        return None
+
+    return url
 
 
-def _read_static_url() -> str:
-    return _URL_FILE.read_text().strip()
+def _read_backend() -> str | None:
+    """Lee backend del tunnel o None si inválido."""
+    if not _BACKEND_FILE.exists():
+        main_logger.warning("[Tunnel] Archivo de backend no existe: %s", _BACKEND_FILE)
+        return None
+
+    backend = _BACKEND_FILE.read_text().strip()
+    if backend not in ("cloudflare", "ngrok"):
+        main_logger.error("[Tunnel] Backend inválido: %s (debe ser cloudflare o ngrok)", backend)
+        return None
+
+    return backend
 
 
-def _read_backend() -> str:
-    return _BACKEND_FILE.read_text().strip()
+def _ensure_tunnel_ready() -> tuple[str | None, str | None]:
+    """Verifica tunnel estático o inicia dinámico. Retorna (url, backend)."""
+    url = _read_static_url()
+    backend = _read_backend()
+
+    if url and backend:
+        main_logger.info("[Tunnel] URL estática configurada: %s (%s)", url, backend)
+        return url, backend
+
+    main_logger.info("[Tunnel] Usando tunnel dinámico")
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -168,9 +201,10 @@ def _start_ngrok_tunnel() -> None:
 
 def start_tunnel(port: int) -> None:
     """Inicia el túnel público: estático (ngrok/cloudflare) o quick como fallback."""
-    if _static_tunnel_configured():
-        url     = _read_static_url()
-        backend = _read_backend()
+    url, backend = _ensure_tunnel_ready()
+
+    if url and backend:
+        # Túnel estático configurado correctamente
         main_logger.info("Túnel estático (%s): %s", backend, url)
 
         if backend == "ngrok":
@@ -186,11 +220,12 @@ def start_tunnel(port: int) -> None:
         main_logger.info("API pública disponible en: %s", url)
         return
 
-    # Sin config → quick tunnel de cloudflare con aviso
+    # Sin config válida → quick tunnel de cloudflare con aviso
     main_logger.warning(
-        "Sin túnel estático configurado — URL cambiará en cada reinicio. "
+        "Sin túnel estático configurado o archivos inválidos — URL cambiará en cada reinicio. "
         "Para URL permanente (gratis, sin dominio): ./setup_tunnel.sh --ngrok"
     )
+    main_logger.warning("[Tunnel] Webhook callbacks pueden fallar sin URL pública estática")
     exe = _find_cloudflared()
     if exe:
         _start_cloudflare_quick(exe, port)
