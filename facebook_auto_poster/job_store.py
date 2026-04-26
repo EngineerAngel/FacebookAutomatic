@@ -2,11 +2,12 @@
 job_store.py — SQLite como fuente única de verdad para todos los jobs y cuentas.
 
 Tablas:
-  accounts     — cuentas activas (nombre, email, grupos, historial)
-  group_tags   — etiquetas amigables por grupo (default 'generico')
-  login_events — historial de intentos de login
-  jobs         — cola de trabajos (inmediatos y agendados)
-  job_results  — resultados por cuenta/grupo
+  accounts          — cuentas activas (nombre, email, grupos, historial)
+  group_tags        — etiquetas amigables por grupo (default 'generico')
+  login_events      — historial de intentos de login
+  jobs              — cola de trabajos (inmediatos y agendados)
+  job_results       — resultados por cuenta/grupo
+  templates         — plantillas de publicación reutilizables
 
 Base de datos: jobs.db (local, gitignored, nunca expuesto por API)
 """
@@ -140,6 +141,15 @@ def init_db() -> None:
                 UNIQUE(account_name, group_id)
             );
 
+            CREATE TABLE IF NOT EXISTS templates (
+                id         TEXT PRIMARY KEY,
+                name       TEXT NOT NULL UNIQUE,
+                text       TEXT NOT NULL,
+                url        TEXT NOT NULL,
+                image_path TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_jobs_scheduled ON jobs(scheduled_for)
                 WHERE type = 'scheduled';
@@ -148,6 +158,7 @@ def init_db() -> None:
                 ON gemini_usage(account_name, used_at);
             CREATE INDEX IF NOT EXISTS idx_account_bans_account
                 ON account_bans(account_name, detected_at);
+            CREATE INDEX IF NOT EXISTS idx_templates_created ON templates(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_ratelimit_lookup
                 ON rate_limit_events(ip, endpoint, ts);
         """)
@@ -1152,3 +1163,99 @@ def list_proxy_assignments() -> list[dict]:
                ORDER BY p.account_name"""
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Templates — plantillas de publicación reutilizables
+# ---------------------------------------------------------------------------
+def create_template(
+    name: str,
+    text: str,
+    url: str,
+    image_path: str | None = None,
+) -> str:
+    """
+    Crea una nueva plantilla de publicación.
+    Retorna el ID generado (UUID corto).
+    """
+    template_id = uuid.uuid4().hex[:12]
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO templates (id, name, text, url, image_path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (template_id, name, text, url, image_path, now),
+        )
+    return template_id
+
+
+def get_template(template_id: str) -> dict | None:
+    """Obtiene una plantilla por ID."""
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """SELECT id, name, text, url, image_path, created_at
+               FROM templates WHERE id=?""",
+            (template_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def list_templates() -> list[dict]:
+    """Lista todas las plantillas ordenadas por fecha (más recientes primero)."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """SELECT id, name, text, url, image_path, created_at
+               FROM templates
+               ORDER BY created_at DESC""",
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_template(
+    template_id: str,
+    name: str | None = None,
+    text: str | None = None,
+    url: str | None = None,
+    image_path: str | None = None,
+) -> bool:
+    """
+    Actualiza una plantilla con los campos proporcionados (solo non-None).
+    Retorna True si existía y fue actualizada.
+    """
+    parts = []
+    params = []
+
+    if name is not None:
+        parts.append("name = ?")
+        params.append(name)
+    if text is not None:
+        parts.append("text = ?")
+        params.append(text)
+    if url is not None:
+        parts.append("url = ?")
+        params.append(url)
+    if image_path is not None:
+        parts.append("image_path = ?")
+        params.append(image_path)
+
+    if not parts:
+        return False
+
+    params.append(template_id)
+
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            f"UPDATE templates SET {', '.join(parts)} WHERE id=?",
+            params,
+        )
+        return cur.rowcount > 0
+
+
+def delete_template(template_id: str) -> bool:
+    """Elimina una plantilla. Retorna True si existía."""
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM templates WHERE id=?",
+            (template_id,),
+        )
+        return cur.rowcount > 0

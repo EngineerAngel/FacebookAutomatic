@@ -19,6 +19,11 @@ Endpoints admin (requieren autenticación con ADMIN_KEY):
     DELETE /admin/api/accounts/<name>       → eliminar cuenta
     GET    /admin/api/groups                → listar grupos + tags
     PUT    /admin/api/groups/<group_id>/tag → asignar tag a grupo
+    GET    /admin/api/templates             → listar plantillas
+    POST   /admin/api/templates             → crear plantilla
+    GET    /admin/api/templates/<id>        → obtener plantilla
+    PUT    /admin/api/templates/<id>        → actualizar plantilla
+    DELETE /admin/api/templates/<id>        → eliminar plantilla
     GET    /admin/api/history               → historial de logins
     GET    /admin/api/proxies               → listar nodos proxy + asignaciones
     POST   /admin/api/proxies               → registrar nodo proxy
@@ -33,6 +38,7 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 import threading
 import time
 import uuid
@@ -1210,3 +1216,121 @@ def admin_cancel_schedule(job_id: str):
         logger.info("Job %s cancelado via admin", job_id)
         return "", 204
     return jsonify({"error": f"Job '{job_id}' no encontrado o ya no está pendiente"}), 404
+
+
+# ===========================================================================
+# ADMIN API — Plantillas de publicación
+# ===========================================================================
+
+@app.get("/admin/api/templates")
+@admin_required
+def admin_list_templates():
+    """Lista todas las plantillas de publicación."""
+    templates = job_store.list_templates()
+    return jsonify(templates), 200
+
+
+@app.post("/admin/api/templates")
+@admin_required
+def admin_create_template():
+    """Crea una nueva plantilla de publicación."""
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    text = (data.get("text") or "").strip()
+    url  = (data.get("url") or "").strip()
+    image_path = (data.get("image_path") or "").strip() or None
+
+    # Validaciones
+    if not name or len(name) < 2 or len(name) > 100:
+        return jsonify({"error": "El nombre debe tener entre 2 y 100 caracteres"}), 400
+    if not text or len(text) < 10:
+        return jsonify({"error": "El texto debe tener al menos 10 caracteres"}), 400
+    if not url:
+        return jsonify({"error": "La URL es obligatoria"}), 400
+
+    # Validar que image_path es seguro si se proporciona
+    if image_path:
+        safe_path = _safe_image_path(image_path)
+        if not safe_path:
+            return jsonify({"error": "image_path inválido o fuera del directorio permitido"}), 400
+        image_path = safe_path
+
+    try:
+        template_id = job_store.create_template(name, text, url, image_path)
+        logger.info("Plantilla '%s' creada (id=%s) via admin", name, template_id)
+        return jsonify({
+            "status": "created",
+            "id": template_id,
+            "name": name,
+        }), 201
+    except sqlite3.IntegrityError:
+        return jsonify({"error": f"Ya existe una plantilla con el nombre '{name}'"}), 409
+    except Exception as exc:
+        logger.error("Error creando plantilla: %s", exc)
+        return jsonify({"error": "Error interno al crear plantilla"}), 500
+
+
+@app.get("/admin/api/templates/<template_id>")
+@admin_required
+def admin_get_template(template_id: str):
+    """Obtiene los detalles de una plantilla específica."""
+    template = job_store.get_template(template_id)
+    if not template:
+        return jsonify({"error": f"Plantilla '{template_id}' no encontrada"}), 404
+    return jsonify(template), 200
+
+
+@app.put("/admin/api/templates/<template_id>")
+@admin_required
+def admin_update_template(template_id: str):
+    """Actualiza una plantilla existente."""
+    template = job_store.get_template(template_id)
+    if not template:
+        return jsonify({"error": f"Plantilla '{template_id}' no encontrada"}), 404
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip() or None
+    text = (data.get("text") or "").strip() or None
+    url  = (data.get("url") or "").strip() or None
+    image_path = (data.get("image_path") or "").strip() or None
+
+    # Validaciones si se proporcionan
+    if name is not None and (len(name) < 2 or len(name) > 100):
+        return jsonify({"error": "El nombre debe tener entre 2 y 100 caracteres"}), 400
+    if text is not None and len(text) < 10:
+        return jsonify({"error": "El texto debe tener al menos 10 caracteres"}), 400
+    if url is not None and not url:
+        return jsonify({"error": "La URL no puede estar vacía"}), 400
+
+    # Validar image_path si se proporciona
+    if image_path:
+        safe_path = _safe_image_path(image_path)
+        if not safe_path:
+            return jsonify({"error": "image_path inválido o fuera del directorio permitido"}), 400
+        image_path = safe_path
+
+    try:
+        success = job_store.update_template(template_id, name, text, url, image_path)
+        if success:
+            logger.info("Plantilla '%s' actualizada via admin", template_id)
+            return jsonify({"status": "updated", "id": template_id}), 200
+        else:
+            return jsonify({"error": "No hay campos para actualizar"}), 400
+    except sqlite3.IntegrityError:
+        if name:
+            return jsonify({"error": f"Ya existe una plantilla con el nombre '{name}'"}), 409
+        raise
+    except Exception as exc:
+        logger.error("Error actualizando plantilla: %s", exc)
+        return jsonify({"error": "Error interno al actualizar plantilla"}), 500
+
+
+@app.delete("/admin/api/templates/<template_id>")
+@admin_required
+def admin_delete_template(template_id: str):
+    """Elimina una plantilla."""
+    deleted = job_store.delete_template(template_id)
+    if deleted:
+        logger.info("Plantilla '%s' eliminada via admin", template_id)
+        return "", 204
+    return jsonify({"error": f"Plantilla '{template_id}' no encontrada"}), 404

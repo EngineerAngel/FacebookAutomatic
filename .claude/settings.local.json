@@ -8,7 +8,11 @@
       "Bash(python -c \"from facebook_auto_poster.facebook_poster import FacebookPoster; print\\('[OK] Import OK'\\)\")",
       "Bash(python -c \"from facebook_poster import FacebookPoster; print\\('[OK]'\\)\")",
       "Bash(git commit -m ' *)",
-      "Bash(python -)"
+      "Bash(python -)",
+      "Bash(dpkg -l)",
+      "Bash(awk '{print $1,$2,$3}')",
+      "Bash(pip3 list *)",
+      "Bash(/home/angel/Proyectos/.venv/bin/pip list *)"
     ]
   }
 }
