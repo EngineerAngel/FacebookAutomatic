@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Publicar — Facebook Auto-Poster</title>
 <link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/static/icon-192x192.png">
 <meta name="theme-color" content="#6366f1">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -772,11 +773,18 @@ async function loadAnuncio() {
 async function loadAccountsData() {
   try {
     const res = await fetch('/admin/api/accounts');
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
     const accounts = await res.json();
+    if (!Array.isArray(accounts)) {
+      throw new Error('Respuesta inválida del servidor');
+    }
     state.allAccounts = accounts;
     renderAccountsSelection();
-  } catch {
-    document.getElementById('accounts-list').innerHTML = '<span style="color:#fca5a5">Error al cargar cuentas</span>';
+  } catch (err) {
+    console.error('Error cargando cuentas:', err);
+    document.getElementById('accounts-list').innerHTML = `<span style="color:#fca5a5">Error al cargar cuentas: ${escapeHtml(err.message)}</span>`;
   }
 }
 
