@@ -534,8 +534,16 @@ async function loadAccounts() {
     tdPub.textContent = fmt(acc.last_published_at);
 
     const tdAcc = document.createElement('td');
+
+    const btnLogin = document.createElement('button');
+    btnLogin.className = 'btn btn-edit btn-sm';
+    btnLogin.title = 'Iniciar sesión (crea cookie de sesión)';
+    btnLogin.textContent = '🔑';
+    btnLogin.onclick = () => triggerLogin(acc.name, btnLogin);
+
     const btnDiscover = document.createElement('button');
     btnDiscover.className = 'btn btn-edit btn-sm';
+    btnDiscover.style.marginLeft = '0.4rem';
     btnDiscover.title = 'Buscar grupos automáticamente';
     btnDiscover.textContent = '🔍';
     btnDiscover.onclick = () => triggerDiscovery(acc.name, btnDiscover);
@@ -552,6 +560,7 @@ async function loadAccounts() {
     btnDel.textContent = '✕ Eliminar';
     btnDel.onclick = () => deleteAccount(acc.name);
 
+    tdAcc.appendChild(btnLogin);
     tdAcc.appendChild(btnDiscover);
     tdAcc.appendChild(btnEdit);
     tdAcc.appendChild(btnDel);
@@ -867,6 +876,53 @@ function pollDiscovery(runId, accountName, btn) {
       toast(`❌ Error al buscar grupos: ${run.error ?? 'desconocido'}`, true);
     }
   }, 3000);  // poll cada 3 segundos
+}
+
+async function triggerLogin(accountName, btn) {
+  btn.disabled = true;
+  btn.textContent = '⏳';
+  btn.title = 'Iniciando sesión…';
+
+  const { ok, data } = await api('POST', `/admin/api/accounts/${accountName}/login`);
+  if (!ok) {
+    toast(`Error al iniciar sesión: ${data?.error ?? 'Error desconocido'}`, true);
+    btn.disabled = false;
+    btn.textContent = '🔑';
+    btn.title = 'Iniciar sesión (crea cookie de sesión)';
+    return;
+  }
+
+  const runId = data.run_id;
+  pollLogin(runId, accountName, btn);
+}
+
+function pollLogin(runId, accountName, btn) {
+  const pollInterval = setInterval(async () => {
+    const { ok, data } = await api('GET', `/admin/api/accounts/${accountName}/login/${runId}`);
+    if (!ok) {
+      clearInterval(pollInterval);
+      btn.disabled = false;
+      btn.textContent = '🔑';
+      btn.title = 'Iniciar sesión (crea cookie de sesión)';
+      return;
+    }
+
+    if (data.status === 'done') {
+      clearInterval(pollInterval);
+      btn.disabled = false;
+      btn.textContent = '🔑';
+      btn.title = 'Iniciar sesión (crea cookie de sesión)';
+      toast(`✅ Sesión iniciada: ${accountName}. Cookie guardada.`);
+      loadAccounts();
+    } else if (data.status === 'error') {
+      clearInterval(pollInterval);
+      btn.disabled = false;
+      btn.textContent = '🔑';
+      btn.title = 'Iniciar sesión (crea cookie de sesión)';
+      toast(`❌ Login fallido (${accountName}): ${data.message ?? 'error desconocido'}`, true);
+    }
+    // si sigue 'running', continúa polling
+  }, 3000);
 }
 
 async function loadDiscoveredGroupsPanel(accountName) {

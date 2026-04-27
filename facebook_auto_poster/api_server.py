@@ -85,6 +85,9 @@ _locks_guard = threading.Lock()
 _running_accounts: set[str] = set()
 _running_accounts_lock = threading.Lock()
 
+# Estado de los runs de login manual (en memoria, no necesita persistencia)
+_login_runs: dict[str, dict] = {}   # run_id → {status, message, account}
+
 
 def _get_account_lock(name: str) -> threading.Lock:
     """Retorna el Lock asociado a una cuenta, creándolo si no existe."""
@@ -925,6 +928,115 @@ def admin_trigger_discovery(name: str):
 def admin_discovery_status(run_id: str):
     """Polling del estado de un descubrimiento."""
     run = job_store.get_discovery_run(run_id)
+    if not run:
+        return jsonify({"error": "run_id no encontrado"}), 404
+    return jsonify(run), 200
+
+
+# ---------------------------------------------------------------------------
+# Login manual de cuenta (crea/renueva cookie de sesión)
+# ---------------------------------------------------------------------------
+
+def _run_login(run_id: str, account_name: str) -> None:
+    """Inicia sesión en Facebook para una cuenta y guarda las cookies."""
+    from config import AccountConfig, pick_fingerprint
+    import os as _os, json as _json
+
+    _login_runs[run_id] = {"status": "running", "message": "Iniciando…", "account": account_name}
+
+    try:
+        rows = job_store.list_accounts_full()
+        row = next((r for r in rows if r["name"] == account_name), None)
+        if not row:
+            _login_runs[run_id] = {"status": "error", "message": f"Cuenta '{account_name}' no encontrada", "account": account_name}
+            return
+
+        global_password = _os.getenv("FB_PASSWORD", "").strip()
+        password = global_password
+        if row.get("password_enc"):
+            try:
+                from crypto import decrypt_password
+                password = decrypt_password(row["password_enc"])
+            except Exception:
+                pass
+
+        fp_raw = row.get("fingerprint_json")
+        fingerprint = _json.loads(fp_raw) if fp_raw else pick_fingerprint([])
+        active_hours = tuple(_json.loads(row.get("active_hours") or "[7, 23]"))
+        groups = _json.loads(row.get("groups") or "[]")
+
+        account = AccountConfig(
+            name=row["name"],
+            email=row["email"],
+            password=password,
+            groups=groups,
+            timezone=row.get("timezone") or "America/Mexico_City",
+            active_hours=active_hours,
+            fingerprint=fingerprint,
+        )
+
+        from facebook_poster import FacebookPoster
+        _login_runs[run_id]["message"] = "Abriendo navegador…"
+        poster = FacebookPoster(account, CONFIG)
+        try:
+            _login_runs[run_id]["message"] = "Iniciando sesión en Facebook…"
+            success = poster.login()
+            if success:
+                _login_runs[run_id] = {
+                    "status": "done",
+                    "message": "Sesión iniciada correctamente. Cookie guardada.",
+                    "account": account_name,
+                }
+                logger.info("[Login manual] '%s' — sesión iniciada OK (run=%s)", account_name, run_id)
+            else:
+                _login_runs[run_id] = {
+                    "status": "error",
+                    "message": "Login fallido. Verifica email/contraseña o que la cuenta no esté bloqueada.",
+                    "account": account_name,
+                }
+                logger.warning("[Login manual] '%s' — login fallido (run=%s)", account_name, run_id)
+        finally:
+            poster.close()
+
+    except Exception as exc:
+        logger.exception("[Login manual] '%s' — error inesperado (run=%s)", account_name, run_id)
+        _login_runs[run_id] = {
+            "status": "error",
+            "message": str(exc),
+            "account": account_name,
+        }
+
+
+@app.post("/admin/api/accounts/<name>/login")
+@admin_required
+def admin_trigger_login(name: str):
+    """
+    Inicia sesión en Facebook para la cuenta indicada (crea/renueva cookie).
+    Retorna {run_id, status: 'running'} para polling.
+    """
+    rows = job_store.list_accounts_full()
+    if not any(r["name"] == name for r in rows):
+        return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
+
+    run_id = uuid.uuid4().hex[:12]
+    _login_runs[run_id] = {"status": "running", "message": "En cola…", "account": name}
+
+    threading.Thread(
+        target=_run_login,
+        args=(run_id, name),
+        daemon=True,
+        name=f"login-{name}",
+    ).start()
+
+    logger.info("[Login manual] Iniciado para '%s' (run=%s)", name, run_id)
+    return jsonify({"run_id": run_id, "status": "running"}), 202
+
+
+@app.get("/admin/api/accounts/<name>/login/<run_id>")
+@admin_required
+def admin_login_status(name: str, run_id: str):
+    """Polling del estado de un login manual."""
+    run = _login_runs.get(run_id)
     if not run:
         return jsonify({"error": "run_id no encontrado"}), 404
     return jsonify(run), 200
