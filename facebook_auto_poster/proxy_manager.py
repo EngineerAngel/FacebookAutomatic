@@ -1,8 +1,18 @@
 """
-proxy_manager.py — Pool de SIM hotspots con health checking y fallback automático.
+proxy_manager.py — Pool de SIM hotspots con asignación dinámica LRU.
 
-Cada teléfono Android conectado por USB actúa como gateway SOCKS5.
-El health checker corre como daemon thread y actualiza proxy_nodes en DB cada 2 min.
+Cada teléfono Android conectado por USB actúa como gateway SOCKS5/HTTP.
+
+Flujo de asignación dinámica (resolve_proxy):
+  1. Si la cuenta tiene proxy asignado y el nodo está online → usarlo
+  2. Si la cuenta NO tiene proxy → buscar nodo con capacidad libre → asignar
+  3. Si todos los nodos están llenos → expulsar la cuenta LRU (la que lleva más
+     tiempo sin publicar) del nodo con más holgura → asignar al solicitante
+  4. Actualizar last_used_at en cada uso para mantener el LRU fresco
+
+MAX_ACCOUNTS_PER_NODE controla la capacidad por teléfono. Cuando se agrega
+un segundo teléfono, las cuentas que superen la capacidad del primero migran
+automáticamente en la siguiente llamada a resolve_proxy.
 """
 
 import json
@@ -17,14 +27,15 @@ import job_store
 
 logger = logging.getLogger("proxy_manager")
 
-CHECK_INTERVAL_S = 120   # chequear cada 2 minutos
-FAIL_THRESHOLD   = 3     # 3 fallos consecutivos → offline
+CHECK_INTERVAL_S    = 120   # health check cada 2 minutos
+FAIL_THRESHOLD      = 3     # fallos consecutivos → offline
+MAX_ACCOUNTS_PER_NODE = 10  # capacidad máxima por nodo (ajustar según el pool)
 
-_started = False
-_lock    = threading.Lock()
+_started     = False
+_lock        = threading.Lock()
 _assign_lock = threading.Lock()
 
-# Cache de proxies asignados (TTL 30s)
+# Cache de proxies resueltos (TTL 30s)
 _proxy_cache: dict[str, tuple[dict, float]] = {}
 _PROXY_CACHE_TTL_S = 30
 
@@ -34,7 +45,7 @@ _PROXY_CACHE_TTL_S = 30
 # ---------------------------------------------------------------------------
 
 def _check_node(node: dict) -> tuple[bool, str]:
-    """Verifica conectividad del nodo con validaciones robustas. Retorna (ok, ip_publica)."""
+    """Verifica conectividad del nodo. Retorna (ok, ip_publica)."""
     server = node["server"]
     try:
         proxies = {"http": server, "https": server}
@@ -43,51 +54,30 @@ def _check_node(node: dict) -> tuple[bool, str]:
             proxies=proxies,
             timeout=10,
         )
-
-        # Validar status HTTP
         if resp.status_code != 200:
-            logger.debug("[ProxyCheck] %s retornó HTTP %d", node["id"], resp.status_code)
             return False, ""
-
-        # Validar que sea JSON válido
-        try:
-            data = resp.json()
-            ip = data.get("ip", "")
-            if not ip:
-                logger.debug("[ProxyCheck] %s sin IP en respuesta", node["id"])
-                return False, ""
-            return True, ip
-        except Exception as json_err:
-            logger.warning("[ProxyCheck] %s respuesta no es JSON: %s", node["id"], json_err)
-            return False, ""
-
+        data = resp.json()
+        ip = data.get("ip", "")
+        return (bool(ip), ip)
     except requests.Timeout:
-        logger.debug("[ProxyCheck] %s timeout (10s)", node["id"])
         return False, ""
     except requests.ConnectionError:
-        logger.debug("[ProxyCheck] %s error de conexión", node["id"])
         return False, ""
-    except Exception as exc:
+    except Exception:
         logger.exception("[ProxyCheck] %s error inesperado", node["id"])
         return False, ""
 
 
 def _run_health_checker() -> None:
-    """Hilo daemon — verifica todos los nodos cada CHECK_INTERVAL_S segundos."""
     logger.info("[ProxyHealth] Daemon iniciado (intervalo=%ds)", CHECK_INTERVAL_S)
     while True:
         try:
             nodes = job_store.list_proxy_nodes()
-            if not nodes:
-                logger.debug("[ProxyHealth] Sin nodos configurados")
             for node in nodes:
                 ok, ip = _check_node(node)
                 if ok:
                     job_store.update_proxy_node_status(
-                        node["id"],
-                        status="online",
-                        last_ip=ip,
-                        reset_fails=True,
+                        node["id"], status="online", last_ip=ip, reset_fails=True,
                     )
                     if node["status"] != "online":
                         logger.info("[Proxy] Nodo %s recuperado — IP: %s", node["id"], ip)
@@ -95,14 +85,11 @@ def _run_health_checker() -> None:
                     fails = (node["check_fail_count"] or 0) + 1
                     new_status = "offline" if fails >= FAIL_THRESHOLD else node["status"]
                     job_store.update_proxy_node_status(
-                        node["id"],
-                        status=new_status,
-                        fail_count=fails,
+                        node["id"], status=new_status, fail_count=fails,
                     )
                     if new_status == "offline" and node["status"] != "offline":
                         logger.warning(
-                            "[Proxy] Nodo %s OFFLINE tras %d fallos consecutivos",
-                            node["id"], fails,
+                            "[Proxy] Nodo %s OFFLINE tras %d fallos", node["id"], fails,
                         )
                         _alert_node_down(node)
         except Exception:
@@ -111,26 +98,23 @@ def _run_health_checker() -> None:
 
 
 def _alert_node_down(node: dict) -> None:
-    """Log crítico + guardar alerta en BD para dashboard."""
     try:
         accounts = job_store.get_accounts_for_node(node["id"])
         names = [a["name"] for a in accounts]
-    except Exception as e:
-        logger.error("Error obteniendo cuentas para nodo %s: %s", node["id"], e)
+    except Exception:
         names = []
-
     logger.critical(
         "[ALERTA] Proxy caído: %s (%s) — cuentas afectadas: %s",
-        node["label"], node["server"], ", ".join(names) if names else "ninguna",
+        node["label"], node["server"], ", ".join(names) or "ninguna",
     )
-
-    # Guardar en BD si existe tabla de alertas
     try:
         if names:
-            alert_msg = f"Nodo proxy {node['label']} offline. Cuentas: {', '.join(names)}"
-            job_store.create_system_alert(alert_msg, severity="critical")
-    except Exception as e:
-        logger.debug("Error creando alerta (puede no existir tabla): %s", e)
+            job_store.create_system_alert(
+                f"Nodo proxy {node['label']} offline. Cuentas: {', '.join(names)}",
+                severity="critical",
+            )
+    except Exception:
+        pass
 
 
 def start() -> None:
@@ -140,41 +124,175 @@ def start() -> None:
         if _started:
             return
         _started = True
-    thread = threading.Thread(
-        target=_run_health_checker,
-        daemon=True,
-        name="proxy-health-checker",
-    )
-    thread.start()
+    threading.Thread(
+        target=_run_health_checker, daemon=True, name="proxy-health-checker",
+    ).start()
 
 
 # ---------------------------------------------------------------------------
-# Resolución de proxy para una cuenta
+# Asignación dinámica interna
+# ---------------------------------------------------------------------------
+
+def _online_nodes() -> list[dict]:
+    return [n for n in job_store.list_proxy_nodes() if n["status"] != "offline"]
+
+
+def _assign_to_free_slot(account_name: str, account_groups: list[str]) -> str | None:
+    """
+    Busca el nodo online con capacidad libre y menor solapamiento de grupos.
+    Retorna node_id asignado, o None si todos están llenos.
+    """
+    nodes = _online_nodes()
+    if not nodes:
+        return None
+
+    best_node: str | None = None
+    best_score: float     = float("inf")
+
+    for node in nodes:
+        count = job_store.count_accounts_for_node(node["id"])
+        if count >= MAX_ACCOUNTS_PER_NODE:
+            continue  # nodo lleno
+
+        existing = job_store.get_accounts_for_node(node["id"])
+        existing_groups: set[str] = set()
+        for acc in existing:
+            try:
+                existing_groups.update(json.loads(acc.get("groups") or "[]"))
+            except Exception:
+                pass
+
+        overlap = len(set(account_groups) & existing_groups)
+        # Penalizar solapamiento de grupos (mismas cuentas en mismo proxy = riesgo)
+        score = overlap * 100 + count
+        if score < best_score:
+            best_score = score
+            best_node  = node["id"]
+
+    if best_node:
+        job_store.set_proxy_assignment(account_name, best_node)
+        logger.info(
+            "[Proxy] '%s' → nodo %s (slot libre, score=%.0f)",
+            account_name, best_node, best_score,
+        )
+    return best_node
+
+
+def _evict_lru_and_assign(account_name: str, account_groups: list[str]) -> str | None:
+    """
+    Todos los nodos están llenos. Expulsa la cuenta con last_used_at más antiguo
+    del nodo más apropiado y asigna ese nodo al solicitante.
+    """
+    nodes = _online_nodes()
+    if not nodes:
+        return None
+
+    # Para cada nodo, obtener su cuenta LRU y calcular antigüedad
+    best_node:    str | None = None
+    best_evictee: str | None = None
+    oldest_ts:    float      = float("inf")
+
+    for node in nodes:
+        lru = job_store.get_lru_account_for_node(node["id"])
+        if not lru:
+            continue  # nodo sin cuentas (raro), asignar directo
+        last_used = lru.get("last_used_at")
+        if last_used is None:
+            ts = 0.0  # nunca usada → candidata inmediata
+        else:
+            try:
+                ts = datetime.fromisoformat(last_used).timestamp()
+            except Exception:
+                ts = 0.0
+
+        if ts < oldest_ts:
+            oldest_ts    = ts
+            best_node    = node["id"]
+            best_evictee = lru["account_name"]
+
+    if not best_node or not best_evictee:
+        logger.error("[Proxy] No se pudo encontrar candidato a expulsión para '%s'", account_name)
+        return None
+
+    # Expulsar la cuenta LRU
+    job_store.delete_proxy_assignment(best_evictee)
+    _proxy_cache.pop(best_evictee, None)
+
+    last_str = (
+        datetime.fromtimestamp(oldest_ts).strftime("%Y-%m-%d %H:%M")
+        if oldest_ts > 0 else "nunca"
+    )
+    logger.warning(
+        "[Proxy] ROTACIÓN: '%s' expulsada de %s (último uso: %s) → entra '%s'",
+        best_evictee, best_node, last_str, account_name,
+    )
+
+    # Asignar el nodo liberado al solicitante
+    job_store.set_proxy_assignment(account_name, best_node)
+    logger.info("[Proxy] '%s' → nodo %s (post-rotación LRU)", account_name, best_node)
+    return best_node
+
+
+def _ensure_assigned(account_name: str) -> str | None:
+    """
+    Garantiza que la cuenta tenga proxy. Llama a _assign_to_free_slot primero,
+    luego a _evict_lru_and_assign si no hay espacio. Protegido con lock global.
+    """
+    with _assign_lock:
+        # Re-verificar dentro del lock (puede haberse asignado mientras esperaba)
+        existing = job_store.get_proxy_assignment(account_name)
+        if existing:
+            return existing["primary_node"]
+
+        # Obtener grupos de la cuenta para el scoring
+        accounts = job_store.list_accounts_full()
+        acc_data = next((a for a in accounts if a["name"] == account_name), {})
+        try:
+            groups = json.loads(acc_data.get("groups") or "[]")
+        except Exception:
+            groups = []
+
+        node_id = _assign_to_free_slot(account_name, groups)
+        if node_id:
+            return node_id
+
+        return _evict_lru_and_assign(account_name, groups)
+
+
+# ---------------------------------------------------------------------------
+# Resolución de proxy para una cuenta (punto de entrada principal)
 # ---------------------------------------------------------------------------
 
 def resolve_proxy(account_name: str, force_refresh: bool = False) -> dict | None:
     """
-    Retorna dict proxy con validación reciente.
+    Retorna el proxy asignado a la cuenta, asignando dinámicamente si es necesario.
 
     Prioridad:
-    1. Cache (si TTL válido)
-    2. Nodo primario si está online
-    3. Nodo secundario si primario está offline
-    4. Fallback de emergencia (cualquier nodo online)
-    5. None si sin nodos disponibles
+    1. Cache válido (TTL 30s)
+    2. Nodo primario online
+    3. Nodo secundario (fallback manual)
+    4. Asignación dinámica — slot libre o rotación LRU
+    5. Cualquier nodo online de emergencia
     """
     now = time.time()
 
-    # Usar cache si es reciente
     if not force_refresh and account_name in _proxy_cache:
         proxy, ts = _proxy_cache[account_name]
         if now - ts < _PROXY_CACHE_TTL_S:
             return proxy
 
     assignment = job_store.get_proxy_assignment(account_name)
+
+    # Sin asignación → asignar dinámicamente ahora
     if not assignment:
-        logger.debug("[Proxy] Sin asignación para '%s'", account_name)
-        return None
+        logger.info("[Proxy] '%s' sin asignación — buscando nodo automáticamente", account_name)
+        node_id = _ensure_assigned(account_name)
+        if not node_id:
+            logger.error("[Proxy] Sin nodos disponibles para '%s'", account_name)
+            return None
+        assignment = job_store.get_proxy_assignment(account_name)
+        if not assignment:
+            return None
 
     candidates = [assignment["primary_node"], assignment.get("secondary_node")]
 
@@ -182,37 +300,38 @@ def resolve_proxy(account_name: str, force_refresh: bool = False) -> dict | None
         if not node_id:
             continue
         node = job_store.get_proxy_node(node_id)
-        if node and node["status"] == "online":
-            # Validación: ¿health checker lo vio online hace poco?
-            last_checked = node.get("last_checked")
-            if last_checked:
-                try:
-                    last_ts = datetime.fromisoformat(last_checked).timestamp()
-                    if now - last_ts > 180:  # > 3 minutos, validar rápido
-                        ok, ip = _check_node(node)
-                        if not ok:
-                            logger.warning("[Proxy] %s offline (validación rápida)", node_id)
-                            continue
-                except Exception:
-                    pass  # Usar valor del DB si hay error en parsing
+        if not node or node["status"] == "offline":
+            continue
 
-            proxy = {"server": node["server"]}
-            _proxy_cache[account_name] = (proxy, now)
-            logger.info(
-                "[Proxy] '%s' → nodo %s (%s)",
-                account_name, node_id, node.get("last_seen_ip", "?"),
-            )
-            return proxy
+        # Si el health checker lleva > 3 min sin verificar, validar rápido
+        last_checked = node.get("last_checked")
+        if last_checked:
+            try:
+                if now - datetime.fromisoformat(last_checked).timestamp() > 180:
+                    ok, ip = _check_node(node)
+                    if not ok:
+                        logger.warning("[Proxy] %s offline (validación rápida)", node_id)
+                        continue
+            except Exception:
+                pass
 
-    # Fallback de emergencia
+        proxy = {"server": node["server"]}
+        _proxy_cache[account_name] = (proxy, now)
+        job_store.touch_proxy_assignment(account_name)
+        logger.info(
+            "[Proxy] '%s' → %s (%s)", account_name, node_id, node.get("last_seen_ip", "?"),
+        )
+        return proxy
+
+    # Ambos candidatos offline → fallback de emergencia
     fallback = job_store.get_any_online_proxy_node(exclude_nodes=candidates)
     if fallback:
         logger.warning(
-            "[Proxy] '%s' fallback → %s (IP compartida temporalmente)",
-            account_name, fallback["id"],
+            "[Proxy] '%s' fallback emergencia → %s (IP compartida)", account_name, fallback["id"],
         )
         proxy = {"server": fallback["server"]}
         _proxy_cache[account_name] = (proxy, now)
+        job_store.touch_proxy_assignment(account_name)
         return proxy
 
     logger.error("[Proxy] Sin nodos disponibles para '%s'", account_name)
@@ -220,7 +339,7 @@ def resolve_proxy(account_name: str, force_refresh: bool = False) -> dict | None
 
 
 # ---------------------------------------------------------------------------
-# Asignación automática de cuentas a nodos
+# Asignación manual (desde admin panel / setup script)
 # ---------------------------------------------------------------------------
 
 def assign_proxy_to_account(
@@ -229,41 +348,32 @@ def assign_proxy_to_account(
     secondary_node: str | None = None,
 ) -> str | None:
     """
-    Asigna proxy con transacción atómica (lock).
-    Asigna el nodo con menos cuentas que no comparta grupos.
+    Asignación manual explícita. Busca el mejor nodo libre sin aplicar rotación LRU.
     Retorna node_id asignado, o None si sin nodos disponibles.
     """
     with _assign_lock:
-        nodes = job_store.list_proxy_nodes()
+        if secondary_node and not job_store.get_proxy_node(secondary_node):
+            logger.error("[Proxy] Nodo secundario '%s' no existe", secondary_node)
+            secondary_node = None
+
+        nodes = _online_nodes()
         if not nodes:
             logger.warning("[Proxy] Sin nodos en pool para asignar a '%s'", account_name)
             return None
 
-        # Validar que secondary_node exista
-        if secondary_node:
-            if not job_store.get_proxy_node(secondary_node):
-                logger.error("[Proxy] Nodo secundario '%s' no existe", secondary_node)
-                secondary_node = None
-
         best_node: str | None = None
-        best_score: float = float("inf")
+        best_score: float     = float("inf")
 
         for node in nodes:
-            if node["status"] == "offline":
-                continue
             existing = job_store.get_accounts_for_node(node["id"])
             existing_groups: set[str] = set()
             for acc in existing:
                 try:
-                    groups = json.loads(acc.get("groups") or "[]")
-                    existing_groups.update(groups)
+                    existing_groups.update(json.loads(acc.get("groups") or "[]"))
                 except Exception:
                     pass
-
             overlap = len(set(account_groups) & existing_groups)
-            count   = len(existing)
-            # Penalizar fuertemente el solapamiento de grupos con el mismo nodo
-            score = overlap * 100 + count
+            score   = overlap * 100 + len(existing)
             if score < best_score:
                 best_score = score
                 best_node  = node["id"]
@@ -271,7 +381,7 @@ def assign_proxy_to_account(
         if best_node:
             job_store.set_proxy_assignment(account_name, best_node, secondary_node)
             logger.info(
-                "[Proxy] '%s' asignado a %s (score=%.0f)",
+                "[Proxy] '%s' asignado manualmente a %s (score=%.0f)",
                 account_name, best_node, best_score,
             )
             return best_node
