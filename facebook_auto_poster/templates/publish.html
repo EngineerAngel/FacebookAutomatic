@@ -797,15 +797,18 @@ function renderAccountsSelection() {
 
   container.innerHTML = '';
   state.allAccounts.forEach(acc => {
-    const selected = state.selectedAccounts.includes(acc.name);
+    const selected   = state.selectedAccounts.includes(acc.name);
+    const hasGroups  = acc.groups && acc.groups.length > 0;
     const item = document.createElement('div');
-    item.className = 'account-item' + (selected ? ' selected' : '');
+    item.className = 'account-item' + (selected ? ' selected' : '') + (!hasGroups ? ' disabled' : '');
+    if (!hasGroups) item.style.opacity = '0.45';
     item.innerHTML = `
-      <div class="account-name" onclick="toggleAccount('${acc.name}')">
+      <div class="account-name" onclick="toggleAccount('${acc.name}')"
+           style="${!hasGroups ? 'cursor:not-allowed' : ''}">
         ☑ ${escapeHtml(acc.name)} — ${escapeHtml(acc.email)}
       </div>
-      <div style="font-size:0.85rem;color:#64748b">
-        ${acc.groups && acc.groups.length > 0 ? acc.groups.length + ' grupo(s)' : '⚠ Sin grupos'}
+      <div style="font-size:0.85rem;color:${hasGroups ? '#64748b' : '#ef4444'}">
+        ${hasGroups ? acc.groups.length + ' grupo(s)' : '⚠ Sin grupos — edita la cuenta para agregarlos'}
       </div>
     `;
     container.appendChild(item);
@@ -813,6 +816,13 @@ function renderAccountsSelection() {
 }
 
 function toggleAccount(name) {
+  const acc = state.allAccounts.find(a => a.name === name);
+  if (acc && (!acc.groups || acc.groups.length === 0)) {
+    showStatus('accounts-status',
+      `⚠ "${name}" no tiene grupos configurados — agrégalos en el panel Cuentas antes de publicar`,
+      'error');
+    return;
+  }
   const idx = state.selectedAccounts.indexOf(name);
   if (idx === -1) {
     state.selectedAccounts.push(name);

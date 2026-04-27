@@ -215,8 +215,19 @@ def admin_required(f):
 # ---------------------------------------------------------------------------
 # Validaciones de input admin
 # ---------------------------------------------------------------------------
-_NAME_RE  = re.compile(r"^[a-z0-9_]{1,30}$")
-_PHONE_RE = re.compile(r"^\+?[0-9]{7,15}$")
+_NAME_RE         = re.compile(r"^[a-z0-9_]{1,30}$")
+_PHONE_RE        = re.compile(r"^\+?[0-9]{7,15}$")
+_GROUP_NUMERIC   = re.compile(r"^\d{8,20}$")           # ID numérico Facebook
+_GROUP_SLUG      = re.compile(r"^[a-zA-Z][a-zA-Z0-9._/-]{2,99}$")  # slug alfanumérico
+
+
+def _is_valid_group_id(g: str) -> bool:
+    """Acepta IDs numéricos (8-20 dígitos) y slugs alfanuméricos de Facebook.
+    Rechaza: todos-mismo-dígito (5555…), todo-ceros, menos de 3 chars."""
+    g = str(g).strip()
+    if _GROUP_NUMERIC.match(g):
+        return len(set(g)) > 1          # rechaza 5555555555555, 0000000000
+    return bool(_GROUP_SLUG.match(g))
 
 
 def _validate_login_id(login_id: str) -> str | None:
@@ -249,8 +260,11 @@ def _validate_account_input(name: str, email: str, groups: list) -> str | None:
         return err
     if groups and isinstance(groups, list):
         for g in groups:
-            if not str(g).strip().isdigit():
-                return f"ID de grupo inválido: '{g}' — solo se aceptan números"
+            if not _is_valid_group_id(str(g)):
+                return (
+                    f"ID de grupo inválido: '{g}' — acepta números (ej: 123456789012345) "
+                    "o slugs (ej: trabajosdemeridayucatan). Evita IDs de prueba como 5555555555"
+                )
     return None
 
 
@@ -359,10 +373,26 @@ def _resolve_accounts(
     except ValueError as exc:
         return [], ({"error": str(exc)}, 500)
 
+    # Detectar cuentas solicitadas que no cargaron (sin grupos, en cooldown, etc.)
+    all_rows = {r["name"] for r in job_store.list_accounts_full()}
+
     if account_filter:
+        # Cuentas que existen en DB pero no cargaron (probablemente sin grupos)
+        no_groups = [n for n in account_filter if n in all_rows
+                     and not any(a.name == n for a in accounts)]
+        not_found = [n for n in account_filter if n not in all_rows]
+
         accounts = [a for a in accounts if a.name in account_filter]
+
         if not accounts:
-            return [], ({"error": "Ninguna cuenta del filtro encontrada"}, 400)
+            parts = []
+            if no_groups:
+                parts.append(f"sin grupos configurados: {', '.join(no_groups)}")
+            if not_found:
+                parts.append(f"no existen: {', '.join(not_found)}")
+            msg = "No se puede publicar — " + " | ".join(parts) if parts \
+                  else "Ninguna cuenta del filtro encontrada o disponible"
+            return [], ({"error": msg}, 400)
 
     return accounts, None
 
