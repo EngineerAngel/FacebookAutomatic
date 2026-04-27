@@ -45,6 +45,13 @@ def discover_groups_for_account(account: AccountConfig, config: dict) -> list[di
     """
     poster = FacebookPoster(account, config)
     try:
+        logger.info(f"[{account.name}] Iniciando sesión...")
+        if not poster.login():
+            raise RuntimeError(
+                f"Login fallido para '{account.name}' — "
+                "verifica credenciales o que la cuenta no esté bloqueada"
+            )
+
         logger.info(f"[{account.name}] Navegando a groups feed...")
         poster.page.goto("https://www.facebook.com/groups/joins/", timeout=30000)
 
