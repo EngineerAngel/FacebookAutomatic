@@ -848,6 +848,41 @@ def get_recent_jobs(limit: int = 50) -> list[dict]:
         return jobs
 
 
+def get_job(job_id: str) -> dict | None:
+    """Retorna un job por ID con sus resultados, o None si no existe."""
+    jobs = get_recent_jobs(limit=1)  # no sirve por ID, query directo
+    with _lock, _connect() as conn:
+        r = conn.execute(
+            """SELECT id, type, status, accounts, scheduled_for,
+                      created_at, started_at, finished_at
+               FROM jobs WHERE id=?""",
+            (job_id,),
+        ).fetchone()
+        if not r:
+            return None
+        results = conn.execute(
+            "SELECT success, error_msg, account_name FROM job_results WHERE job_id=?",
+            (job_id,),
+        ).fetchall()
+        succeeded = sum(1 for x in results if x["success"] and x["account_name"] != "__system__")
+        failed    = sum(1 for x in results if not x["success"] and x["account_name"] != "__system__")
+        errors    = [x["error_msg"] for x in results
+                     if x["account_name"] == "__system__" and x["error_msg"]]
+        return {
+            "id":          r["id"],
+            "type":        r["type"],
+            "status":      r["status"],
+            "accounts":    json.loads(r["accounts"]) if r["accounts"] else None,
+            "scheduled_for": r["scheduled_for"],
+            "created_at":  r["created_at"],
+            "started_at":  r["started_at"],
+            "finished_at": r["finished_at"],
+            "groups_ok":   succeeded,
+            "groups_fail": failed,
+            "errors":      errors,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Cookies — asociadas al email, sobreviven renombres de cuenta
 # ---------------------------------------------------------------------------

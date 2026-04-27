@@ -136,7 +136,7 @@ def is_account_hour_allowed(account: AccountConfig) -> bool:
     """Verifica si la hora local de la cuenta está dentro de su ventana de publicación."""
     local_hour = datetime.now(ZoneInfo(account.timezone)).hour
     start, end = account.active_hours
-    return start <= local_hour < end
+    return start <= local_hour <= end
 
 
 # ---------------------------------------------------------------------------

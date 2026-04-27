@@ -966,18 +966,16 @@ async function publish() {
       return;
     }
 
-    showStatus('confirm-status', 'Publicado exitosamente. Job ID: ' + data.job_id, 'ok');
-
-    // Recargar listas
-    try {
+    if (state.publishWhen === 'scheduled') {
+      showStatus('confirm-status', '📅 Publicación programada. Job ID: ' + data.job_id, 'ok');
       await loadScheduled();
-    } catch (e) {
-      console.error('Error recargando jobs:', e);
+      resetForm();
+      return;
     }
 
-    // Solo resetear si todo fue bien
-    resetForm();
-    switchWorkflow('templates');  // Volver al inicio
+    // Publicación inmediata: esperar resultado real con polling
+    showStatus('confirm-status', '⏳ Procesando publicación…', 'info');
+    await pollJobStatus(data.job_id);
 
   } catch (err) {
     console.error('Error publicando:', err);
@@ -985,6 +983,46 @@ async function publish() {
   } finally {
     btn.disabled = false;
   }
+}
+
+async function pollJobStatus(jobId) {
+  const MAX_WAIT_MS  = 5 * 60 * 1000;  // máximo 5 minutos esperando
+  const POLL_MS      = 3000;
+  const start        = Date.now();
+
+  while (Date.now() - start < MAX_WAIT_MS) {
+    await new Promise(r => setTimeout(r, POLL_MS));
+    try {
+      const res  = await fetch('/admin/api/jobs/' + jobId);
+      if (!res.ok) continue;
+      const job  = await res.json();
+
+      if (job.status === 'done') {
+        const ok   = job.groups_ok   || 0;
+        const fail = job.groups_fail || 0;
+        if (fail === 0) {
+          showStatus('confirm-status', `✅ Publicado — ${ok} grupo${ok !== 1 ? 's' : ''} exitoso${ok !== 1 ? 's' : ''}`, 'ok');
+        } else {
+          showStatus('confirm-status', `⚠️ Publicado con errores — ${ok} OK / ${fail} fallido${fail !== 1 ? 's' : ''}`, 'error');
+        }
+        await loadScheduled();
+        resetForm();
+        return;
+      }
+
+      if (job.status === 'failed') {
+        const reason = (job.errors && job.errors[0]) || 'Error desconocido';
+        showStatus('confirm-status', `❌ Falló: ${reason}`, 'error');
+        const btn = document.getElementById('btn-publish');
+        if (btn) btn.disabled = false;
+        return;
+      }
+      // 'pending' o 'running' → seguir esperando
+    } catch (e) {
+      // error de red transitorio, seguir reintentando
+    }
+  }
+  showStatus('confirm-status', '⏰ Tiempo de espera agotado. Revisa el historial de jobs.', 'error');
 }
 
 function resetForm() {

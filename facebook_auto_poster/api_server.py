@@ -962,6 +962,16 @@ def admin_jobs():
     return jsonify(job_store.get_recent_jobs(limit))
 
 
+@app.get("/admin/api/jobs/<job_id>")
+@admin_required
+def admin_job_status(job_id: str):
+    """Estado de un job específico (para polling desde el frontend)."""
+    job = job_store.get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job no encontrado"}), 404
+    return jsonify(job)
+
+
 @app.get("/admin/api/bans")
 @admin_required
 def admin_list_bans():
