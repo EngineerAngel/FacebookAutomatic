@@ -161,17 +161,286 @@ Mejoras al escaneo automático:
 
 ---
 
+## BUG 7 — `groups` llega como string JSON al frontend (~500 grupos falsos)
+
+**Archivo:** `api_server.py` — `admin_list_accounts()`
+
+**Causa:** El campo `groups` se guarda en SQLite como JSON string (`'["111","222"]'`). El endpoint lo parseaba internamente pero **no reasignaba el resultado** al dict antes de serializarlo. El frontend recibía el string crudo.
+
+```python
+# ANTES — groups_list se parsea pero nunca se devuelve
+groups_list = json.loads(r.get("groups") or "[]")
+r["has_groups"] = len(groups_list) > 0
+# r["groups"] sigue siendo el string original
+
+# DESPUÉS
+groups_list = json.loads(r.get("groups") or "[]")
+r["groups"] = groups_list   # ← asignar el array real
+r["has_groups"] = len(groups_list) > 0
+```
+
+**Síntomas:**
+- `acc.groups.length` devolvía ~500 (longitud del string, no cantidad de grupos)
+- La sección de grupos del paso 3 en `publish.html` no renderizaba (`.forEach` falla en strings)
+- El panel mostraba "500 grupo(s)" para cuentas con 3-5 grupos reales
+
+**Patrón a vigilar en migración:** Siempre que un campo de BD sea JSON string, reasignarlo como array antes de `jsonify()`.
+
+---
+
+## BUG 8 — `selectTemplate()` falla en Firefox con `event.currentTarget`
+
+**Archivo:** `templates/publish.html`
+
+**Causa:** `event.currentTarget` es un implicit global (`window.event`) que Firefox no soporta. En Chrome funciona por accidente, pero es undefined en Firefox y Safari.
+
+```js
+// ANTES — falla en Firefox/Safari
+event.currentTarget.classList.add('selected');
+
+// DESPUÉS — busca el card correcto por índice en state.allTemplates
+document.querySelectorAll('.template-card').forEach((card, idx) => {
+  const cardData = state.allTemplates[idx];
+  if (cardData && cardData.id === tplId) {
+    card.classList.add('selected');
+  } else {
+    card.classList.remove('selected');
+  }
+});
+```
+
+---
+
+## BUG 9 — `publish()` envía `scheduled_for=null` al servidor
+
+**Archivo:** `templates/publish.html`
+
+**Causa:** No había validación de `state.publishDatetime` antes de armar el `FormData`. Si el usuario llegaba al paso Confirmar sin poner fecha, enviaba `scheduled_for=null` → el servidor fallaba con `ValueError` al parsear.
+
+**Fix:** Validar antes de deshabilitar el botón:
+```js
+if (state.publishWhen === 'scheduled') {
+  if (!state.publishDatetime || state.publishDatetime.trim() === '') {
+    showStatus('confirm-status', 'Selecciona fecha y hora', 'error');
+    return;
+  }
+  const scheduled = new Date(state.publishDatetime);
+  if (isNaN(scheduled.getTime()) || scheduled <= new Date()) {
+    showStatus('confirm-status', 'La fecha debe ser en el futuro', 'error');
+    return;
+  }
+}
+```
+
+---
+
+## BUG 10 — `loadTemplates()` no detecta errores HTTP
+
+**Archivo:** `templates/publish.html`
+
+**Causa:** `fetch()` no lanza excepción en errores HTTP (401, 500). El código hacía `res.json()` directamente — si el servidor devolvía un objeto `{error: "..."}` en vez de array, el `forEach` posterior fallaba silenciosamente.
+
+```js
+// ANTES — ignora res.ok
+const res = await fetch('/admin/api/templates');
+const templates = await res.json();  // puede ser {error: "..."} si 401/500
+state.allTemplates = templates;      // TypeError en forEach
+
+// DESPUÉS
+if (!res.ok) {
+  const err = await res.json().catch(() => ({}));
+  throw new Error(err.error || `HTTP ${res.status}`);
+}
+const templates = await res.json();
+if (!Array.isArray(templates)) throw new Error('Respuesta inválida');
+```
+
+**Mismo patrón aplicado a `loadAccountsData()`.**
+
+---
+
+## BUG 11 — XSS en `showTemplatePreview()` via `innerHTML`
+
+**Archivo:** `templates/publish.html`
+
+**Causa:** La función construía un string HTML con datos del servidor y lo asignaba a `body.innerHTML`. Si `image_path` contenía `javascript:alert('xss')`, `escapeHtml()` lo dejaba pasar como atributo `src`.
+
+**Fix:** Construir el DOM con `createElement` + `textContent`, y validar que `image_path` empiece con `/`:
+
+```js
+// ANTES — peligroso
+body.innerHTML = `<img src="${escapeHtml(tpl.image_path)}">`;
+
+// DESPUÉS — seguro
+if (tpl.image_path && tpl.image_path.startsWith('/')) {
+  const img = document.createElement('img');
+  img.src = tpl.image_path;  // solo rutas locales
+  body.appendChild(img);
+}
+```
+
+---
+
+## BUG 12 — Endpoints de plantillas no validan formato de `template_id`
+
+**Archivo:** `api_server.py` — endpoints GET/PUT/DELETE `/admin/api/templates/<template_id>`
+
+**Causa:** Sin validación, un `template_id` con caracteres arbitrarios llegaba directamente a `job_store`. Aunque las queries son parametrizadas (no hay SQL injection), es mejor rechazar IDs malformados en el límite.
+
+**Fix:** Validar con regex antes de consultar la BD:
+```python
+_TEMPLATE_ID_PATTERN = re.compile(r'^[a-f0-9]{12}$')
+
+def _validate_template_id(template_id: str) -> bool:
+    return bool(_TEMPLATE_ID_PATTERN.match(template_id))
+
+# En cada endpoint:
+if not _validate_template_id(template_id):
+    return jsonify({"error": "ID de plantilla inválido"}), 400
+```
+
+---
+
+## BUG 13 — Sin límites de tamaño en campos de plantilla
+
+**Archivo:** `api_server.py`
+
+**Causa:** Solo había validación de mínimo (10 chars en texto), pero no de máximo. Un texto de 10 MB pasaría la validación y se guardaría en la BD.
+
+**Fix:** Definir constantes y validar en create y update:
+```python
+MAX_TEMPLATE_TEXT_CHARS = 50000   # 50 KB
+MAX_TEMPLATE_NAME_CHARS = 100
+MAX_TEMPLATE_URL_CHARS  = 2048
+MIN_TEMPLATE_TEXT_CHARS = 10
+```
+
+---
+
+## BUG 14 — Race condition en `assign_proxy_to_account()`
+
+**Archivo:** `proxy_manager.py`
+
+**Causa:** La función leía la lista de nodos, calculaba el mejor, y luego asignaba — sin lock. Dos threads ejecutando simultáneamente podían asignar dos cuentas al mismo nodo sin detectar el solapamiento.
+
+**Fix:** Envolver con `_assign_lock = threading.Lock()`:
+```python
+_assign_lock = threading.Lock()
+
+def assign_proxy_to_account(...):
+    with _assign_lock:
+        nodes = job_store.list_proxy_nodes()
+        # ... calcular + asignar en transacción atómica
+```
+
+---
+
+## BUG 15 — `_check_node()` ignora errores de JSON en respuesta del proxy
+
+**Archivo:** `proxy_manager.py`
+
+**Causa:** Si el proxy devolvía una respuesta HTTP 200 pero con body HTML (página de error del ISP), `resp.json()` lanzaba excepción que caía al `except Exception` genérico — el nodo se marcaba offline cuando en realidad el proxy sí conectaba.
+
+**Fix:** Separar los `except` por tipo:
+```python
+except requests.Timeout:
+    return False, ""
+except requests.ConnectionError:
+    return False, ""
+except Exception:
+    logger.exception("[ProxyCheck] %s error inesperado", node["id"])
+    return False, ""
+```
+Y validar el JSON por separado con su propio try/except que loguea `warning` en vez de marcar offline.
+
+---
+
+## BUG 16 — `admin_assign_proxy()` no valida que los nodos existan
+
+**Archivo:** `api_server.py`
+
+**Causa:** En la asignación manual de proxy, si `primary_node` no existía en BD, la función `job_store.set_proxy_assignment()` fallaba con FK constraint error sin retornar un mensaje útil al cliente.
+
+**Fix:**
+```python
+if not job_store.get_proxy_node(primary):
+    return jsonify({"error": f"Nodo primario '{primary}' no existe"}), 404
+if secondary and not job_store.get_proxy_node(secondary):
+    return jsonify({"error": f"Nodo secundario '{secondary}' no existe"}), 404
+try:
+    job_store.set_proxy_assignment(name, primary, secondary)
+except Exception:
+    logger.exception("Error asignando proxy a '%s':", name)
+    return jsonify({"error": "Error en base de datos"}), 500
+```
+
+---
+
+## BUG 17 — `_read_static_url()` falla si el archivo del túnel está vacío
+
+**Archivo:** `main.py`
+
+**Causa:** `_read_static_url()` hacía `_URL_FILE.read_text().strip()` sin verificar si el archivo existía o tenía contenido válido. Si el archivo estaba vacío o contenía una ruta no-URL, el startup continuaba con una URL vacía — los webhook callbacks fallaban silenciosamente.
+
+**Fix:**
+```python
+def _read_static_url() -> str | None:
+    if not _URL_FILE.exists():
+        return None
+    url = _URL_FILE.read_text().strip()
+    if not url or not url.startswith(("http://", "https://")):
+        logger.error("[Tunnel] URL inválida en %s: '%s'", _URL_FILE, url)
+        return None
+    return url
+```
+Igual para `_read_backend()` — validar que el valor sea `"cloudflare"` o `"ngrok"`.
+
+---
+
 ## Checklist para migración
 
 Al migrar a rama nueva, verificar:
 
-- [ ] Ejecutar `UPDATE accounts SET is_active=1 WHERE is_active IS NULL;` en la DB
-- [ ] Ejecutar `ALTER TABLE account_proxy_assignment ADD COLUMN last_used_at TEXT;` (si no existe — falla silenciosamente)
-- [ ] Instalar `PySocks` en el venv: `pip install "requests[socks]"`
-- [ ] Confirmar que `config.py` usa `<=` en `is_account_hour_allowed`
-- [ ] Confirmar que `publish.html` tiene la función `pollJobStatus`
-- [ ] Confirmar que `api_server.py` tiene el endpoint `GET /admin/api/jobs/<job_id>`
-- [ ] Probar con `./setup_phone_proxy.sh --status` que no da error SOCKS
+**Base de datos:**
+- [ ] `UPDATE accounts SET is_active=1 WHERE is_active IS NULL;`
+- [ ] `ALTER TABLE account_proxy_assignment ADD COLUMN last_used_at TEXT;` (falla silenciosamente si ya existe)
+
+**Dependencias:**
+- [ ] `pip install "requests[socks]"` — soporte SOCKS5
+- [ ] Confirmar `PySocks` en `requirements.txt`
+
+**Backend — api_server.py:**
+- [ ] `admin_list_accounts()`: `r["groups"] = groups_list` está presente (no solo `has_groups`)
+- [ ] `admin_list_templates()`, `admin_create_template()`, etc. usan `logger.exception()` no `logger.error()`
+- [ ] Constantes `MAX_TEMPLATE_TEXT_CHARS`, `MIN_TEMPLATE_TEXT_CHARS` definidas antes de los endpoints
+- [ ] `_validate_template_id()` definida y llamada en GET/PUT/DELETE de templates
+- [ ] `admin_assign_proxy()` valida nodos con `get_proxy_node()` antes de `set_proxy_assignment()`
+- [ ] Endpoint `GET /admin/api/jobs/<job_id>` existe
+
+**Backend — config.py:**
+- [ ] `is_account_hour_allowed` usa `<=` en el extremo superior (no `<`)
+
+**Backend — proxy_manager.py:**
+- [ ] `_assign_lock = threading.Lock()` declarado globalmente
+- [ ] `assign_proxy_to_account()` usa `with _assign_lock:`
+- [ ] `_check_node()` tiene `except requests.Timeout` y `except requests.ConnectionError` separados
+- [ ] `resolve_proxy()` implementa cache con `_proxy_cache` dict + `_PROXY_CACHE_TTL_S`
+
+**Backend — main.py:**
+- [ ] `_read_static_url()` retorna `str | None` y valida contenido
+- [ ] `_read_backend()` valida que sea `"cloudflare"` o `"ngrok"`
+- [ ] `_ensure_tunnel_ready()` existe y se usa en `start_tunnel()`
+
+**Frontend — publish.html:**
+- [ ] `loadTemplates()` valida `res.ok` y `Array.isArray()`
+- [ ] `loadAccountsData()` valida `res.ok` y `Array.isArray()`
+- [ ] `selectTemplate()` no usa `event.currentTarget`
+- [ ] `showTemplatePreview()` usa `createElement` + `textContent` (no `innerHTML` con datos externos)
+- [ ] `publish()` valida `scheduled_for` antes de deshabilitar el botón
+- [ ] `publish()` tiene polling con `pollJobStatus()` o verifica `res.ok` antes de resetear
+
+**Tests:**
+- [ ] Ejecutar `python3 test_code_verification.py` → debe dar 13/13
 
 ---
 
@@ -181,9 +450,10 @@ Al migrar a rama nueva, verificar:
 |---------|--------|
 | `config.py` | Fix horario activo: `<` → `<=` |
 | `job_store.py` | last_used_at, get_job, count_accounts_for_node, get_lru_account_for_node, touch_proxy_assignment |
-| `proxy_manager.py` | Sistema LRU completo, reescrito |
-| `api_server.py` | Endpoint GET /admin/api/jobs/<job_id> |
+| `proxy_manager.py` | LRU, lock en assign, cache en resolve, validaciones en _check_node, _alert_node_down |
+| `api_server.py` | groups deserialization, template validation, proxy endpoint validation, job endpoint |
 | `templates/admin.html` | Fix JSON.parse sobre array ya deserializado (3 lugares) |
-| `templates/publish.html` | Polling real del resultado del job |
+| `templates/publish.html` | Firefox fix, scheduled_for, loadTemplates/loadAccounts error handling, XSS fix |
+| `main.py` | _read_static_url, _read_backend, _ensure_tunnel_ready con validación |
 | `setup_phone_proxy.sh` | Reescrito: venv Python, nuevos comandos, detección de protocolo |
 | `requirements.txt` | PySocks añadido |
