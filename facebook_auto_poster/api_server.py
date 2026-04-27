@@ -419,7 +419,8 @@ def _filter_rate_limited_accounts(accounts):
 
 
 def _run_job(job_id: str, accounts, text: str,
-             image_path: str | None, callback_url: str | None) -> None:
+             image_path: str | None, callback_url: str | None,
+             skip_hour_check: bool = False) -> None:
     # Adquirir locks por cuenta en orden lexicográfico para prevenir deadlocks
     # cuando dos jobs comparten cuentas en distintos órdenes.
     accounts_sorted = sorted(accounts, key=lambda a: a.name)
@@ -449,6 +450,7 @@ def _run_job(job_id: str, accounts, text: str,
         mgr = AccountManager(
             runnable, CONFIG, text,
             image_path=image_path, callback_url=callback_url,
+            skip_hour_check=skip_hour_check,
         )
         results = mgr.run()
         mgr.print_summary(results)
@@ -471,9 +473,10 @@ def _run_job(job_id: str, accounts, text: str,
 
 
 def _enqueue_job(job_id: str, accounts, text: str,
-                 image_path: str | None, callback_url: str | None) -> None:
+                 image_path: str | None, callback_url: str | None,
+                 skip_hour_check: bool = False) -> None:
     """Envía un job al pool. Max_workers limita la concurrencia global."""
-    _executor.submit(_run_job, job_id, accounts, text, image_path, callback_url)
+    _executor.submit(_run_job, job_id, accounts, text, image_path, callback_url, skip_hour_check)
 
 
 def shutdown_executor(wait: bool = False) -> None:
@@ -493,13 +496,43 @@ def shutdown_executor(wait: bool = False) -> None:
 def _run_discovery(run_id: str, account_name: str) -> None:
     """Ejecuta el descubrimiento de grupos para una cuenta en un thread."""
     try:
-        accounts = load_accounts()
-        account = next((a for a in accounts if a.name == account_name), None)
-        if not account:
+        # load_accounts() omite cuentas sin grupos — exactamente las que queremos descubrir.
+        # Leer directo de BD sin ese filtro para construir el AccountConfig.
+        from config import AccountConfig, pick_fingerprint
+        import os, json as _json
+
+        rows = job_store.list_accounts_full()
+        row = next((r for r in rows if r["name"] == account_name), None)
+        if not row:
             job_store.fail_discovery_run(
                 run_id, f"Cuenta '{account_name}' no encontrada"
             )
             return
+
+        global_password = os.getenv("FB_PASSWORD", "").strip()
+        password = global_password
+        if row.get("password_enc"):
+            try:
+                from crypto import decrypt_password
+                password = decrypt_password(row["password_enc"])
+            except Exception:
+                pass
+
+        fp_raw = row.get("fingerprint_json")
+        fingerprint = _json.loads(fp_raw) if fp_raw else pick_fingerprint([])
+
+        active_hours = tuple(_json.loads(row.get("active_hours") or "[7, 23]"))
+        groups = _json.loads(row.get("groups") or "[]")
+
+        account = AccountConfig(
+            name=row["name"],
+            email=row["email"],
+            password=password,
+            groups=groups,
+            timezone=row.get("timezone") or "America/Mexico_City",
+            active_hours=active_hours,
+            fingerprint=fingerprint,
+        )
 
         logger.info("[%s] Iniciando descubrimiento de grupos (run=%s)", account_name, run_id)
         groups = discover_groups_for_account(account, CONFIG)
@@ -1195,7 +1228,8 @@ def admin_post():
     logger.info("Job %s aceptado via admin | cuentas=%s", job_id,
                 [a.name for a in accounts])
 
-    _enqueue_job(job_id, accounts, payload["text"], payload["image_path"], None)
+    _enqueue_job(job_id, accounts, payload["text"], payload["image_path"], None,
+                 skip_hour_check=True)
 
     return jsonify({
         "status": "accepted",
