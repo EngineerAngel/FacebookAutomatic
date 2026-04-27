@@ -450,6 +450,29 @@ poster.page.goto("https://www.facebook.com/groups/joins/")
 
 ---
 
+## BUG 20 — Guards en trigger_discovery y list_discovered_groups usaban load_accounts()
+
+**Archivo:** `api_server.py` — `admin_trigger_discovery()` y `admin_list_discovered_groups()`
+
+**Causa:** Ambos endpoints tenían un guard de "cuenta no encontrada" que llamaba `load_accounts()`, la cual **filtra cuentas sin grupos configurados**. Esto hacía que aunque `_run_discovery()` ya usara `job_store.list_accounts_full()` correctamente, el endpoint rechazaba la petición antes de llegar al thread con un 404.
+
+```python
+# ANTES — en admin_trigger_discovery() y admin_list_discovered_groups()
+accounts = load_accounts()  # filtra cuentas sin grupos
+if not any(a.name == name for a in accounts):
+    return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
+
+# DESPUÉS
+if not any(r["name"] == name for r in job_store.list_accounts_full()):
+    return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
+```
+
+**Síntoma:** Cuentas sin grupos configurados (las que más necesitan el descubrimiento) siempre devolvían `{"error": "Cuenta 'X' no encontrada"}` 404. Solo funcionaba con cuentas que ya tenían grupos.
+
+**Regla:** `load_accounts()` es **exclusivo del pipeline de publicación** — requiere grupos para funcionar. Todo lo demás (discovery, login manual, listado) debe usar `job_store.list_accounts_full()`.
+
+---
+
 ## Checklist para migración
 
 Al migrar a rama nueva, verificar:
@@ -493,6 +516,8 @@ Al migrar a rama nueva, verificar:
 - [ ] `publish()` tiene polling con `pollJobStatus()` o verifica `res.ok` antes de resetear
 
 **Descubrimiento de grupos:**
+- [ ] `admin_trigger_discovery()` guard usa `job_store.list_accounts_full()`, **no** `load_accounts()`
+- [ ] `admin_list_discovered_groups()` guard usa `job_store.list_accounts_full()`, **no** `load_accounts()`
 - [ ] `_run_discovery()` usa `job_store.list_accounts_full()` directamente, **no** `load_accounts()`
 - [ ] `group_discoverer.py` llama `poster.login()` antes de `poster.page.goto()`
 - [ ] Si `poster.login()` retorna `False`, lanza `RuntimeError` con mensaje claro

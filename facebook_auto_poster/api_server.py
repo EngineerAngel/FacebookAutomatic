@@ -903,9 +903,8 @@ def admin_trigger_discovery(name: str):
     Inicia descubrimiento automático de grupos para una cuenta.
     Retorna {run_id, status: "running"} para polling.
     """
-    # Verificar que la cuenta existe
-    accounts = load_accounts()
-    if not any(a.name == name for a in accounts):
+    # Verificar que la cuenta existe (sin filtrar por grupos — pueden no tener aún)
+    if not any(r["name"] == name for r in job_store.list_accounts_full()):
         return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
 
     run_id = uuid.uuid4().hex[:12]
@@ -1046,9 +1045,7 @@ def admin_login_status(name: str, run_id: str):
 @admin_required
 def admin_list_discovered_groups(name: str):
     """Lista grupos descubiertos para una cuenta."""
-    # Verificar que la cuenta existe
-    accounts = load_accounts()
-    if not any(a.name == name for a in accounts):
+    if not any(r["name"] == name for r in job_store.list_accounts_full()):
         return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
 
     groups = job_store.list_discovered_groups(name)
