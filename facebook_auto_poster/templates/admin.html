@@ -188,6 +188,8 @@ tr:hover td { background: #151823; }
   border-radius: 4px; padding: 0.15rem 0.45rem; font-size: 0.72rem;
   margin-left: 0.4rem; vertical-align: middle;
 }
+.modal-lg { max-width: 560px; }
+.field textarea { resize: vertical; font-family: inherit; }
 </style>
 </head>
 <body>
@@ -206,6 +208,7 @@ tr:hover td { background: #151823; }
   <div class="tabs">
     <button class="tab-btn active" data-tab="accounts">Cuentas</button>
     <button class="tab-btn" data-tab="groups">Grupos &amp; Tags</button>
+    <button class="tab-btn" data-tab="templates">Plantillas</button>
     <button class="tab-btn" data-tab="jobs">Jobs</button>
     <button class="tab-btn" data-tab="history">Logins</button>
   </div>
@@ -332,6 +335,31 @@ tr:hover td { background: #151823; }
     </div>
   </div>
 
+  <!-- ══════ TAB: Plantillas ══════ -->
+  <div id="tab-templates" class="tab-panel">
+    <div class="section-hdr">
+      <h2>Plantillas de publicación</h2>
+      <button class="btn btn-primary" onclick="openTemplateModal()">+ Nueva plantilla</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Nombre</th>
+            <th>Texto (vista previa)</th>
+            <th>URL</th>
+            <th>Imagen</th>
+            <th>Creada</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="templates-body">
+          <tr><td colspan="6" class="empty">Cargando...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
 </div><!-- /container -->
 
 <!-- ══════ Modal cuenta ══════ -->
@@ -378,6 +406,35 @@ tr:hover td { background: #151823; }
   </div>
 </div>
 
+<!-- ══════ Modal plantilla ══════ -->
+<div class="modal-bg" id="template-modal-bg">
+  <div class="modal modal-lg">
+    <h3 id="template-modal-title">Nueva plantilla</h3>
+    <div class="field">
+      <label>Nombre <small>(2–100 caracteres)</small></label>
+      <input type="text" id="tf-name" placeholder="Oferta de temporada" maxlength="100">
+    </div>
+    <div class="field">
+      <label>Texto del post</label>
+      <textarea id="tf-text" rows="6" placeholder="Escribe aquí el texto que se publicará en los grupos..."></textarea>
+      <p class="hint"><span id="tf-char-count">0</span> caracteres (mín. 10)</p>
+    </div>
+    <div class="field">
+      <label>URL <small>(obligatoria)</small></label>
+      <input type="text" id="tf-url" placeholder="https://ejemplo.com/producto" maxlength="2048">
+    </div>
+    <div class="field">
+      <label>Ruta de imagen <small>(opcional — ruta en el servidor)</small></label>
+      <input type="text" id="tf-image" placeholder="/ruta/en/servidor/imagen.jpg" maxlength="512">
+      <p class="hint">Deja vacío si el post no lleva imagen.</p>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-cancel" onclick="closeTemplateModal()">Cancelar</button>
+      <button class="btn btn-save" onclick="saveTemplate()">Guardar</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -391,9 +448,10 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
-    if (btn.dataset.tab === 'groups')  { loadGroups(); loadProfilesDiscovery(); }
-    if (btn.dataset.tab === 'jobs')    loadJobs();
-    if (btn.dataset.tab === 'history') loadHistory();
+    if (btn.dataset.tab === 'groups')    { loadGroups(); loadProfilesDiscovery(); }
+    if (btn.dataset.tab === 'templates') loadTemplates();
+    if (btn.dataset.tab === 'jobs')      loadJobs();
+    if (btn.dataset.tab === 'history')   loadHistory();
   });
 });
 
@@ -1045,12 +1103,142 @@ async function addDiscoveredGroupInline(accountName, groupId, btn) {
   }
 }
 
+// ─── Plantillas ───────────────────────────────────────────────────────────
+let editingTemplateId = null;
+
+async function loadTemplates() {
+  const { ok, data } = await api('GET', '/admin/api/templates');
+  const tbody = document.getElementById('templates-body');
+  tbody.innerHTML = '';
+  if (!ok || !data.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">No hay plantillas. Crea la primera con "+ Nueva plantilla".</td></tr>';
+    return;
+  }
+  data.forEach(t => {
+    const tr = document.createElement('tr');
+
+    const tdName = document.createElement('td');
+    tdName.textContent = t.name;
+    tdName.style.fontWeight = '500';
+
+    const tdText = document.createElement('td');
+    const preview = t.text.length > 80 ? t.text.slice(0, 80) + '…' : t.text;
+    tdText.textContent = preview;
+    tdText.style.color = '#94a3b8';
+    tdText.style.fontSize = '0.82rem';
+    tdText.title = t.text;
+
+    const tdUrl = document.createElement('td');
+    const link = document.createElement('a');
+    link.href = t.url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = t.url.length > 40 ? t.url.slice(0, 40) + '…' : t.url;
+    link.style.color = '#7c8cf8';
+    link.style.fontSize = '0.82rem';
+    tdUrl.appendChild(link);
+
+    const tdImg = document.createElement('td');
+    if (t.image_path) {
+      const badge = document.createElement('span');
+      badge.className = 'badge ok';
+      badge.textContent = '✓ Imagen';
+      badge.title = t.image_path;
+      tdImg.appendChild(badge);
+    } else {
+      tdImg.textContent = '—';
+      tdImg.style.color = '#475569';
+    }
+
+    const tdDate = document.createElement('td');
+    tdDate.textContent = fmt(t.created_at);
+
+    const tdAcc = document.createElement('td');
+    const btnEdit = document.createElement('button');
+    btnEdit.className = 'btn btn-edit btn-sm';
+    btnEdit.textContent = '✏ Editar';
+    btnEdit.onclick = () => openTemplateModal(t);
+
+    const btnDel = document.createElement('button');
+    btnDel.className = 'btn btn-del btn-sm';
+    btnDel.style.marginLeft = '0.4rem';
+    btnDel.textContent = '✕ Eliminar';
+    btnDel.onclick = () => deleteTemplate(t.id, t.name);
+
+    tdAcc.appendChild(btnEdit);
+    tdAcc.appendChild(btnDel);
+
+    tr.appendChild(tdName);
+    tr.appendChild(tdText);
+    tr.appendChild(tdUrl);
+    tr.appendChild(tdImg);
+    tr.appendChild(tdDate);
+    tr.appendChild(tdAcc);
+    tbody.appendChild(tr);
+  });
+}
+
+function openTemplateModal(t = null) {
+  editingTemplateId = t ? t.id : null;
+  document.getElementById('template-modal-title').textContent = t ? 'Editar plantilla' : 'Nueva plantilla';
+  document.getElementById('tf-name').value  = t ? t.name : '';
+  document.getElementById('tf-text').value  = t ? t.text : '';
+  document.getElementById('tf-url').value   = t ? t.url  : '';
+  document.getElementById('tf-image').value = t && t.image_path ? t.image_path : '';
+  updateTemplateCharCount();
+  document.getElementById('template-modal-bg').classList.add('open');
+}
+
+function closeTemplateModal() {
+  document.getElementById('template-modal-bg').classList.remove('open');
+  editingTemplateId = null;
+}
+
+function updateTemplateCharCount() {
+  const len = document.getElementById('tf-text').value.length;
+  document.getElementById('tf-char-count').textContent = len.toLocaleString('es');
+}
+document.getElementById('tf-text').addEventListener('input', updateTemplateCharCount);
+
+async function saveTemplate() {
+  const name  = document.getElementById('tf-name').value.trim();
+  const text  = document.getElementById('tf-text').value.trim();
+  const url   = document.getElementById('tf-url').value.trim();
+  const image = document.getElementById('tf-image').value.trim() || null;
+
+  if (!name || name.length < 2)  { toast('El nombre debe tener al menos 2 caracteres', true); return; }
+  if (!text || text.length < 10) { toast('El texto debe tener al menos 10 caracteres', true); return; }
+  if (!url)                       { toast('La URL es obligatoria', true); return; }
+
+  const isEdit = editingTemplateId !== null;
+  const method = isEdit ? 'PUT' : 'POST';
+  const path   = isEdit ? `/admin/api/templates/${editingTemplateId}` : '/admin/api/templates';
+
+  const { ok, data } = await api(method, path, { name, text, url, image_path: image });
+  if (!ok) { toast(data.error || 'Error al guardar', true); return; }
+
+  toast(isEdit ? 'Plantilla actualizada' : 'Plantilla creada');
+  closeTemplateModal();
+  loadTemplates();
+}
+
+async function deleteTemplate(id, name) {
+  if (!confirm(`¿Eliminar la plantilla "${name}"?`)) return;
+  const { ok, data } = await api('DELETE', `/admin/api/templates/${id}`);
+  if (!ok) { toast(data.error || 'Error al eliminar', true); return; }
+  toast('Plantilla eliminada');
+  loadTemplates();
+}
+
 // ─── Cerrar modal con Escape ──────────────────────────────────────────────
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') closeModal();
+  if (e.key === 'Escape') { closeModal(); closeTemplateModal(); }
 });
 document.getElementById('modal-bg').addEventListener('click', e => {
   if (e.target === document.getElementById('modal-bg')) closeModal();
+});
+document.getElementById('template-modal-bg').addEventListener('click', e => {
+  if (e.target === document.getElementById('template-modal-bg')) closeTemplateModal();
 });
 
 // ─── Init ─────────────────────────────────────────────────────────────────
