@@ -70,9 +70,8 @@ def _vary_text(text: str, account_name: str) -> str:
 # ---------------------------------------------------------------------------
 # Constantes de la UI de Chrome (para sincronizar coordenadas con Emunium)
 # ---------------------------------------------------------------------------
-# Offset vertical aprox desde el borde superior de la ventana al viewport en Windows
-# (title bar + tab strip + address bar). Ajustable si hace falta.
-_CHROME_UI_Y_OFFSET = 85
+# Fallback cuando la medición dinámica no está disponible (ej: about:blank no cargado).
+_CHROME_UI_Y_OFFSET_FALLBACK = 85
 
 # ---------------------------------------------------------------------------
 # Detección de bans — mitigación de falsos positivos
@@ -132,11 +131,6 @@ class FacebookPoster:
         # (requiere 2 detecciones dentro de _BAN_WINDOW_S para activar cooldown)
         self._ban_detection_times: list[float] = []
 
-        # -- Window offsets for Emunium screen-coord translation ---------
-        pos_x, pos_y = config.get("browser_window_position", (0, 0))
-        self._window_x_offset = pos_x
-        self._window_y_offset = pos_y + _CHROME_UI_Y_OFFSET
-
         # -- Playwright lifecycle ----------------------------------------
         # launch_persistent_context no expone Browser separado; self.browser
         # se conserva como None por retrocompatibilidad con código legacy
@@ -145,16 +139,35 @@ class FacebookPoster:
         self._pw = sync_playwright().start()
         self.context, self.page = self._build_browser()
 
+        # -- Window offsets for Emunium screen-coord translation ---------
+        # El offset Y de la UI de Chrome (tabs + barra URL) se mide dinámicamente
+        # para evitar que el cursor aterrice unos píxeles arriba de los botones.
+        pos_x, pos_y = config.get("browser_window_position", (0, 0))
+        self._window_x_offset = pos_x
+        self._chrome_ui_offset = self._measure_chrome_ui_offset()
+        self._window_y_offset = pos_y + self._chrome_ui_offset
+
         # -- Emunium (standalone, opera en coords OS) --------------------
+        # En modo paralelo se desactiva aunque esté habilitado en config:
+        # múltiples procesos comparten el mismo cursor del OS → conflicto.
         self._em = None
-        if config.get("emunium_enabled", True) and _HAS_EMUNIUM and not config["browser_headless"]:
+        execution_mode = config.get("execution_mode", "sequential")
+        emunium_eligible = (
+            config.get("emunium_enabled", True)
+            and _HAS_EMUNIUM
+            and not config["browser_headless"]
+            and execution_mode != "parallel"
+        )
+        if emunium_eligible:
             try:
                 self._em = Emunium()
-                self.logger.info("[Emunium] Activo (coords OS: offset=%d,%d)",
-                                 self._window_x_offset, self._window_y_offset)
+                self.logger.info("[Emunium] Activo (coords OS: offset=%d,%d, chrome_ui=%dpx)",
+                                 self._window_x_offset, self._window_y_offset, self._chrome_ui_offset)
             except Exception:
                 self.logger.warning("[Emunium] Error inicializando — fallback a clicks Patchright", exc_info=True)
                 self._em = None
+        elif execution_mode == "parallel":
+            self.logger.info("[Emunium] Desactivado — modo paralelo (conflicto de cursor OS)")
 
         # -- Gemini commenter (opcional) ---------------------------------
         self._gemini: GeminiCommenter | None = None
@@ -202,6 +215,31 @@ class FacebookPoster:
     # ------------------------------------------------------------------ #
     # Browser setup
     # ------------------------------------------------------------------ #
+    def _measure_chrome_ui_offset(self) -> int:
+        """Mide la altura real de la UI de Chrome (barra de tabs + URL) vía JS.
+
+        Evalúa `window.outerHeight - window.innerHeight` en la página activa.
+        El resultado varía por SO, escala de pantalla y configuración del DE.
+        Devuelve el fallback hardcoded si la evaluación falla o devuelve un
+        valor fuera del rango razonable (40–200 px).
+        """
+        try:
+            raw = self.page.evaluate("window.outerHeight - window.innerHeight")
+            offset = int(raw)
+            if 40 <= offset <= 200:
+                self.logger.info("[Emunium] Chrome UI offset medido dinámicamente: %dpx", offset)
+                return offset
+            self.logger.warning(
+                "[Emunium] Offset medido (%dpx) fuera de rango — usando fallback %dpx",
+                offset, _CHROME_UI_Y_OFFSET_FALLBACK,
+            )
+        except Exception:
+            self.logger.warning(
+                "[Emunium] No se pudo medir Chrome UI offset — usando fallback %dpx",
+                _CHROME_UI_Y_OFFSET_FALLBACK, exc_info=True,
+            )
+        return _CHROME_UI_Y_OFFSET_FALLBACK
+
     def _resolve_user_data_dir(self) -> Path:
         """Resuelve el user_data_dir para esta cuenta. Maneja profiles corruptos.
 
