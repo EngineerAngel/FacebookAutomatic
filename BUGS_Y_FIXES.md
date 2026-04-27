@@ -397,6 +397,35 @@ Igual para `_read_backend()` — validar que el valor sea `"cloudflare"` o `"ngr
 
 ---
 
+## BUG 18 — Descubrimiento de grupos falla en cuentas sin grupos ("no encontrada")
+
+**Archivo:** `api_server.py` — `_run_discovery()`
+
+**Causa:** `_run_discovery()` llamaba a `load_accounts()` para buscar la cuenta. Pero `load_accounts()` filtra y omite cuentas que no tienen grupos configurados (comportamiento correcto para publicar). Las cuentas sin grupos son exactamente las que necesitan el descubrimiento — así que siempre fallaban con `"Cuenta 'X' no encontrada"`. Solo funcionaba para cuentas que ya tenían grupos (como `zarai`).
+
+**Fix:** Leer directo de `job_store.list_accounts_full()` (sin filtro de grupos) y construir el `AccountConfig` manualmente:
+
+```python
+# ANTES — omite cuentas sin grupos
+accounts = load_accounts()
+account = next((a for a in accounts if a.name == account_name), None)
+
+# DESPUÉS — lee sin filtro de grupos
+rows = job_store.list_accounts_full()
+row = next((r for r in rows if r["name"] == account_name), None)
+account = AccountConfig(
+    name=row["name"],
+    email=row["email"],
+    password=password,
+    groups=json.loads(row.get("groups") or "[]"),  # puede ser [] — está bien
+    ...
+)
+```
+
+**Patrón a vigilar en migración:** Nunca usar `load_accounts()` cuando el objetivo es operar sobre *todas* las cuentas registradas. `load_accounts()` es solo para el pipeline de publicación.
+
+---
+
 ## Checklist para migración
 
 Al migrar a rama nueva, verificar:
@@ -438,6 +467,10 @@ Al migrar a rama nueva, verificar:
 - [ ] `showTemplatePreview()` usa `createElement` + `textContent` (no `innerHTML` con datos externos)
 - [ ] `publish()` valida `scheduled_for` antes de deshabilitar el botón
 - [ ] `publish()` tiene polling con `pollJobStatus()` o verifica `res.ok` antes de resetear
+
+**Descubrimiento de grupos:**
+- [ ] `_run_discovery()` usa `job_store.list_accounts_full()` directamente, **no** `load_accounts()`
+- [ ] Probar descubrimiento con cuenta sin grupos — no debe dar "no encontrada"
 
 **Tests:**
 - [ ] Ejecutar `python3 test_code_verification.py` → debe dar 13/13
