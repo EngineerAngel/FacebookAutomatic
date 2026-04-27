@@ -426,6 +426,30 @@ account = AccountConfig(
 
 ---
 
+## BUG 19 — Descubrimiento de grupos navega sin hacer login primero
+
+**Archivo:** `group_discoverer.py` — `discover_groups_for_account()`
+
+**Causa:** El código creaba `FacebookPoster` y llamaba directamente `poster.page.goto()` sin invocar `poster.login()`. Para cuentas con cookies activas (como zarai) el contexto persistente ya tenía sesión y funcionaba. Para cuentas nuevas o sin cookies, Facebook redirige silenciosamente al login — el script JS extrae 0 grupos o extrae links de la página de login.
+
+```python
+# ANTES — sin login
+poster = FacebookPoster(account, config)
+poster.page.goto("https://www.facebook.com/groups/joins/")  # redirige a /login sin sesión
+
+# DESPUÉS — login explícito
+poster = FacebookPoster(account, config)
+if not poster.login():
+    raise RuntimeError("Login fallido para 'X' — verifica credenciales")
+poster.page.goto("https://www.facebook.com/groups/joins/")
+```
+
+**Síntoma:** Las cuentas sin cookies siempre devolvían 0 grupos o fallaban. Solo funcionaba la cuenta con sesión ya activa.
+
+**Patrón a vigilar en migración:** Cualquier flujo que use `FacebookPoster` debe llamar `poster.login()` antes de navegar. El login intenta restaurar cookies primero, y solo hace email/password si no hay sesión guardada.
+
+---
+
 ## Checklist para migración
 
 Al migrar a rama nueva, verificar:
@@ -470,7 +494,9 @@ Al migrar a rama nueva, verificar:
 
 **Descubrimiento de grupos:**
 - [ ] `_run_discovery()` usa `job_store.list_accounts_full()` directamente, **no** `load_accounts()`
-- [ ] Probar descubrimiento con cuenta sin grupos — no debe dar "no encontrada"
+- [ ] `group_discoverer.py` llama `poster.login()` antes de `poster.page.goto()`
+- [ ] Si `poster.login()` retorna `False`, lanza `RuntimeError` con mensaje claro
+- [ ] Probar descubrimiento con cuenta sin cookies — no debe dar "no encontrada" ni 0 grupos silencioso
 
 **Tests:**
 - [ ] Ejecutar `python3 test_code_verification.py` → debe dar 13/13
