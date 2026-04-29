@@ -707,6 +707,89 @@ class FacebookPoster:
                 continue
         return False
 
+    def _try_trusted_device_reauth(self) -> bool:
+        """Maneja re-autenticación cuando Facebook reconoce el dispositivo
+        pero pide confirmación adicional (cookies parcialmente válidas).
+
+        Cubre dos escenarios y los aplica en cadena si aparecen:
+        1. Picker de perfil en facebook.com con botón "Continuar"
+        2. Modal de solo contraseña (input[name='pass'] sin input[name='email'])
+
+        Retorna True si la sesión queda activa tras manejar el flujo.
+        """
+        handled_any = False
+
+        # --- Escenario 1: picker "Continuar / Usar otro perfil" ---
+        try:
+            continuar = self.page.locator(
+                "//div[@role='button'][.//span[contains(text(),'Continuar') "
+                "or contains(text(),'Continue')]]"
+            ).first
+            if continuar.is_visible(timeout=2000):
+                self.logger.info("[Login] Picker de perfil detectado — clic 'Continuar'")
+                self._human_click(continuar)
+                self.human_wait(2, 4)
+                handled_any = True
+                if self._is_logged_in():
+                    return True
+        except Exception:
+            pass
+
+        # --- Escenario 2: modal de solo contraseña ---
+        try:
+            pass_input = self.page.locator("//input[@name='pass']").first
+            if pass_input.is_visible(timeout=2000):
+                # Verificar que el campo email NO esté visible (= modal solo password)
+                email_visible = False
+                try:
+                    email_visible = (
+                        self.page.locator("//input[@name='email']")
+                        .first.is_visible(timeout=500)
+                    )
+                except Exception:
+                    pass
+
+                if not email_visible:
+                    self.logger.info(
+                        "[Login] Modal de re-auth detectado — solo contraseña"
+                    )
+                    self.human_wait(0.5, 1.5)
+                    self._human_click(pass_input)
+                    pass_input.fill("")
+                    self._human_type(pass_input, self.account.password)
+                    self.human_wait(0.5, 1.5)
+                    pass_input.press("Enter")
+                    handled_any = True
+
+                    # Esperar que la sesión se active o que aparezca un challenge
+                    deadline = time.monotonic() + 25
+                    while time.monotonic() < deadline:
+                        if "/login" not in self.page.url and self._is_logged_in():
+                            return True
+                        challenge = self._detect_challenge()
+                        if challenge == "banned":
+                            self._banned = True
+                            self._handle_banned("reauth")
+                            return False
+                        if challenge != "clear":
+                            self.logger.warning(
+                                "[Login] Desafío durante re-auth: %s", challenge
+                            )
+                            if self._wait_for_manual_resolution():
+                                return True
+                            return False
+                        time.sleep(1)
+                    self.logger.warning("[Login] Re-auth no completó en 25s")
+        except Exception:
+            self.logger.warning("[Login] Error en re-auth de dispositivo", exc_info=True)
+
+        # Si manejamos algo (clic en Continuar) pero no caímos en password,
+        # revalidar — pudo haber pasado a sesión completa después del clic
+        if handled_any and self._is_logged_in():
+            return True
+
+        return False
+
     def _detect_challenge(self) -> str:
         """Detecta si Facebook está mostrando CAPTCHA, checkpoint o soft-ban.
 
@@ -831,25 +914,26 @@ class FacebookPoster:
     def _wait_for_manual_resolution(self) -> bool:
         """Pausa hasta que el operador resuelva el CAPTCHA/checkpoint manualmente.
 
-        Polling cada 10s, timeout 60s (6 intentos). Retorna True si se resolvió.
+        Polling cada 10s, timeout 10 min (60 intentos). Retorna True si se resolvió.
         """
+        _MAX_ATTEMPTS = 60  # 60 × 10s = 10 minutos
         self._screenshot("captcha_detected.png")
         print(f"\n{'='*60}")
         print(f"  CAPTCHA/CHECKPOINT detectado — cuenta: {self.account.name}")
         print(f"  Resuelve manualmente en el navegador Chrome.")
-        print(f"  Tiempo máximo: 60 segundos (verificando cada 10s)")
+        print(f"  Tiempo máximo: 10 minutos (verificando cada 10s)")
         print(f"{'='*60}\n")
         self.logger.warning("[CAPTCHA] Esperando resolución manual para %s", self.account.name)
 
-        for attempt in range(1, 7):  # 6 × 10s = 60s
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
             time.sleep(10)
             if self._detect_challenge() == "clear" and self._is_logged_in():
-                self.logger.info("[CAPTCHA] Resuelto manualmente en intento %d/6", attempt)
+                self.logger.info("[CAPTCHA] Resuelto manualmente en intento %d/%d", attempt, _MAX_ATTEMPTS)
                 return True
-            self.logger.info("[CAPTCHA] Intento %d/6 — aún pendiente", attempt)
+            self.logger.info("[CAPTCHA] Intento %d/%d — aún pendiente", attempt, _MAX_ATTEMPTS)
 
         self.logger.error(
-            "[CAPTCHA] Timeout 60s — no se resolvió. Cerrando cuenta %s", self.account.name
+            "[CAPTCHA] Timeout 10 min — no se resolvió. Cerrando cuenta %s", self.account.name
         )
         print(f"\n[!] Timeout CAPTCHA — se cierra la cuenta {self.account.name}\n")
         return False
@@ -899,6 +983,21 @@ class FacebookPoster:
                         )
                         job_store.record_login(self.account.name, True)
                         return True
+
+                    # Cookies parcialmente válidas: Facebook reconoce dispositivo
+                    # pero pide re-autenticación ("Continuar" o solo password)
+                    if self._try_trusted_device_reauth():
+                        self.logger.info(
+                            "[Login] ✓ Re-auth dispositivo conocido para %s", self.account.name
+                        )
+                        self.human_wait(
+                            self.config["wait_after_login_min"],
+                            self.config["wait_after_login_max"],
+                        )
+                        self._save_cookies()
+                        job_store.record_login(self.account.name, True)
+                        return True
+
                     self.logger.info("[Login] Cookies cargadas pero sesión inactiva (expiradas) — login normal")
                 else:
                     self.logger.info("[Login] Sin cookies válidas — procediendo con login normal")
@@ -912,6 +1011,21 @@ class FacebookPoster:
             self.logger.info("[Login] Paso 2/4 — Navegando a facebook.com/login ...")
             self.page.goto("https://www.facebook.com/login", timeout=30000)
             self.logger.info("[Login] URL actual: %s", self.page.url)
+            self.human_wait(2, 4)
+
+            # Facebook puede mostrar el modal de re-auth (solo password) en /login
+            # cuando ya hay datos de sesión en el contexto persistente
+            if self._try_trusted_device_reauth():
+                self.logger.info(
+                    "[Login] ✓ Re-auth en /login para %s", self.account.name
+                )
+                self.human_wait(
+                    self.config["wait_after_login_min"],
+                    self.config["wait_after_login_max"],
+                )
+                self._save_cookies()
+                job_store.record_login(self.account.name, True)
+                return True
 
             self.logger.info("[Login] Paso 3/4 — Esperando formulario de login ...")
             email_input = self.page.locator("//input[@name='email']").first
