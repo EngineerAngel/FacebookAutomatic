@@ -30,10 +30,13 @@ logger = logging.getLogger("proxy_manager")
 CHECK_INTERVAL_S    = 120   # health check cada 2 minutos
 FAIL_THRESHOLD      = 3     # fallos consecutivos → offline
 MAX_ACCOUNTS_PER_NODE = 10  # capacidad máxima por nodo (ajustar según el pool)
+NODE_COOLDOWN_S     = 120   # min segundos entre logins de cuentas distintas en el mismo nodo
+NODE_COOLDOWN_MAX_WAIT_S = 180  # tope de espera para no bloquear indefinidamente
 
 _started     = False
 _lock        = threading.Lock()
 _assign_lock = threading.Lock()
+_cooldown_lock = threading.Lock()
 
 # Cache de proxies resueltos (TTL 30s)
 _proxy_cache: dict[str, tuple[dict, float]] = {}
@@ -260,6 +263,37 @@ def _ensure_assigned(account_name: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Cooldown entre cuentas en el mismo nodo
+# ---------------------------------------------------------------------------
+
+def _wait_for_node_cooldown(node_id: str, account_name: str) -> None:
+    """Espera si otra cuenta del mismo nodo se usó hace menos de NODE_COOLDOWN_S.
+
+    Reduce la correlación de logins simultáneos desde la misma IP pública
+    (señal anti-fraude de Facebook con varias cuentas por proxy).
+    """
+    with _cooldown_lock:
+        last_used = job_store.last_node_use(node_id, exclude_account=account_name)
+        if not last_used:
+            return
+        try:
+            elapsed = (datetime.now() - datetime.fromisoformat(last_used)).total_seconds()
+        except Exception:
+            return
+
+        if elapsed >= NODE_COOLDOWN_S:
+            return
+
+        wait = min(NODE_COOLDOWN_S - elapsed, NODE_COOLDOWN_MAX_WAIT_S)
+        logger.info(
+            "[Proxy] Cooldown nodo %s — esperando %.0fs antes de '%s' "
+            "(otra cuenta lo usó hace %.0fs)",
+            node_id, wait, account_name, elapsed,
+        )
+        time.sleep(wait)
+
+
+# ---------------------------------------------------------------------------
 # Resolución de proxy para una cuenta (punto de entrada principal)
 # ---------------------------------------------------------------------------
 
@@ -315,8 +349,9 @@ def resolve_proxy(account_name: str, force_refresh: bool = False) -> dict | None
             except Exception:
                 pass
 
+        _wait_for_node_cooldown(node_id, account_name)
         proxy = {"server": node["server"]}
-        _proxy_cache[account_name] = (proxy, now)
+        _proxy_cache[account_name] = (proxy, time.time())
         job_store.touch_proxy_assignment(account_name)
         logger.info(
             "[Proxy] '%s' → %s (%s)", account_name, node_id, node.get("last_seen_ip", "?"),
@@ -329,8 +364,9 @@ def resolve_proxy(account_name: str, force_refresh: bool = False) -> dict | None
         logger.warning(
             "[Proxy] '%s' fallback emergencia → %s (IP compartida)", account_name, fallback["id"],
         )
+        _wait_for_node_cooldown(fallback["id"], account_name)
         proxy = {"server": fallback["server"]}
-        _proxy_cache[account_name] = (proxy, now)
+        _proxy_cache[account_name] = (proxy, time.time())
         job_store.touch_proxy_assignment(account_name)
         return proxy
 

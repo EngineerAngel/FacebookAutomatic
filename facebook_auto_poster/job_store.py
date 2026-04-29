@@ -1238,6 +1238,23 @@ def get_lru_account_for_node(node_id: str) -> dict | None:
         return dict(row) if row else None
 
 
+def last_node_use(node_id: str, exclude_account: str) -> str | None:
+    """
+    Retorna el last_used_at más reciente de cualquier cuenta en este nodo,
+    excluyendo la cuenta indicada. None si nunca se ha usado por otra cuenta.
+    """
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """SELECT MAX(last_used_at) as latest
+               FROM account_proxy_assignment
+               WHERE primary_node=?
+                 AND account_name != ?
+                 AND last_used_at IS NOT NULL""",
+            (node_id, exclude_account),
+        ).fetchone()
+        return row["latest"] if row and row["latest"] else None
+
+
 # ---------------------------------------------------------------------------
 # Templates — plantillas de publicación reutilizables
 # ---------------------------------------------------------------------------
