@@ -62,12 +62,14 @@ class AccountManager:
         text: str,
         image_path: str | None = None,
         callback_url: str | None = None,
+        skip_hour_check: bool = False,
     ) -> None:
         self.accounts = accounts
         self.config = config
         self.text = text
         self.image_path = image_path
         self.callback_url = callback_url
+        self.skip_hour_check = skip_hour_check
 
     # ------------------------------------------------------------------ #
     # Sequential execution
@@ -140,18 +142,21 @@ class AccountManager:
     # Unified entry point
     # ------------------------------------------------------------------ #
     def run(self) -> dict[str, dict[str, bool]]:
-        in_window = [a for a in self.accounts if is_account_hour_allowed(a)]
-        skipped = [a for a in self.accounts if not is_account_hour_allowed(a)]
-        for a in skipped:
-            logger.warning(
-                "Cuenta '%s' fuera de su horario local (tz=%s ventana=%s-%s) — saltando",
-                a.name, a.timezone, a.active_hours[0], a.active_hours[1],
-            )
-        if not in_window:
-            msg = "Todas las cuentas están fuera de su horario permitido"
-            logger.warning(msg)
-            raise ValueError(msg)
-        self.accounts = in_window
+        if self.skip_hour_check:
+            logger.info("Restricción horaria omitida (publicación manual desde admin)")
+        else:
+            in_window = [a for a in self.accounts if is_account_hour_allowed(a)]
+            skipped = [a for a in self.accounts if not is_account_hour_allowed(a)]
+            for a in skipped:
+                logger.warning(
+                    "Cuenta '%s' fuera de su horario local (tz=%s ventana=%s-%s) — saltando",
+                    a.name, a.timezone, a.active_hours[0], a.active_hours[1],
+                )
+            if not in_window:
+                msg = "Todas las cuentas están fuera de su horario permitido"
+                logger.warning(msg)
+                raise ValueError(msg)
+            self.accounts = in_window
 
         mode = self.config.get("execution_mode", "sequential")
         logger.info("Execution mode: %s", mode)
