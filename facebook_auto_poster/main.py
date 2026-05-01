@@ -17,29 +17,19 @@ from pathlib import Path
 from waitress import serve
 
 from config import CONFIG
+from logging_config import setup_logging
 
 # ---------------------------------------------------------------------------
 # Logger global → logs/main.log + consola
 # ---------------------------------------------------------------------------
 LOG_DIR = Path(__file__).resolve().parent / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+setup_logging(
+    structured=CONFIG.get("structured_logging", False),
+    log_dir=LOG_DIR,
+)
 
 main_logger = logging.getLogger("main")
-main_logger.setLevel(logging.DEBUG)
-
-_fh = logging.FileHandler(LOG_DIR / "main.log", encoding="utf-8")
-_fh.setLevel(logging.DEBUG)
-_fh.setFormatter(
-    logging.Formatter("%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
-)
-main_logger.addHandler(_fh)
-
-_ch = logging.StreamHandler()
-_ch.setLevel(logging.INFO)
-_ch.setFormatter(
-    logging.Formatter("%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
-)
-main_logger.addHandler(_ch)
 
 
 # ---------------------------------------------------------------------------

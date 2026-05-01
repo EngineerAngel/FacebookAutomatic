@@ -20,3 +20,6 @@ google-genai~=0.3
 
 # Cifrado de contrasenias individuales (Fernet / AES-128-CBC + HMAC)
 cryptography~=42.0
+
+# Logs estructurados en JSON (Fase 3.3a) — activos con STRUCTURED_LOGGING=1
+structlog~=24.0

@@ -50,6 +50,7 @@ CONFIG: dict = {
     "implicit_wait": 10,
     "max_retries": 3,
     "text_variation_mode": "gemini",  # "gemini" | "zero_width" | "off"
+    "structured_logging": os.getenv("STRUCTURED_LOGGING", "0").strip() == "1",
 
     "execution_mode": os.getenv("EXECUTION_MODE", "sequential").strip().lower(),
     "api_port": int(os.getenv("API_PORT", "5000")),

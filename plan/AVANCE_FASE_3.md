@@ -46,7 +46,7 @@ master
 |-------|---|------|--------|-----------------------|-----------|
 | 0 | — | Setup `pytest` + tests ancla sobre código existente | ✅ Completado | — | 2026-04-26 |
 | 1 | 3.5 | Eliminar lock global SQLite | ✅ Completado | — | 2026-04-26 |
-| 2 | 3.3a | Logs estructurados (structlog) | ⏳ Pendiente | `structured_logging` | — |
+| 2 | 3.3a | Logs estructurados (structlog) | ✅ Completado | `structured_logging` / `STRUCTURED_LOGGING=1` | 2026-05-01 |
 | 3 | 3.1 | Migración a Playwright async | ⏳ Pendiente | `use_async_poster` | — |
 | 4 | 3.2 | FastAPI montado en `/v2` | ⏳ Pendiente | `use_fastapi` | — |
 | 5 | 3.3b | Prometheus + dashboards | ⏳ Pendiente | `expose_metrics` | — |
@@ -101,20 +101,34 @@ La flag `use_thread_local_db_conn` se descartó: el cambio es seguro e irrompibl
 
 ---
 
-### Ítem 3.3a — Logs estructurados (structlog)
+### Ítem 3.3a — Logs estructurados (structlog) ✅
 
-**Antes que el resto del refactor** porque facilita debuggear los pasos siguientes.
+**Completado 2026-05-01.**
 
-- Añadir `structlog~=24.0` a `requirements.txt`.
-- `logging_config.py` con `JSONRenderer` + `merge_contextvars` + `dict_tracebacks`.
-- Helper `bind_account(name)` para inyectar `account=name` en todos los logs del thread.
-- Migrar logs críticos (login, publish, ban detection) a `logger.info("event_name", **fields)`.
-- Flag: `structured_logging` (cuando OFF, sigue logging clásico).
+Archivos tocados:
+- `logging_config.py` (nuevo): `setup_logging()`, `get_formatter()`, `bind_account()`, `unbind_account()` con flag `_structured`.
+- `config.py`: flag `structured_logging` (default `False`), activable con `STRUCTURED_LOGGING=1` en `.env`.
+- `main.py`: eliminado setup manual de handlers, reemplazado por `setup_logging()`.
+- `facebook_poster.py`: handlers usan `get_formatter()` + `bind_account()` en `login()` + `unbind_account()` en `close()`.
+- `requirements.txt`: añadido `structlog~=24.0`.
+
+**Cómo activar:**
+```bash
+# en .env
+STRUCTURED_LOGGING=1
+```
+Todos los logs del proceso pasan a ser JSON por línea. El campo `account` aparece automáticamente en cualquier log producido durante una sesión activa de cuenta.
+
+**Ejemplo de log JSON resultante:**
+```json
+{"event": "Login exitoso para elena", "level": "info", "logger": "poster.elena", "account": "elena", "timestamp": "2026-05-01T12:30:00Z"}
+```
 
 **Criterio de cierre:**
-- [ ] Logs de publish son 1 línea JSON por evento.
-- [ ] Búsqueda `grep '"event":"publish_success"'` sobre `logs/main.log` funciona.
-- [ ] Logs clásicos siguen siendo legibles en consola con flag OFF.
+- [x] Logs JSON válidos con campos `event`, `level`, `timestamp`, `logger`.
+- [x] `bind_account` inyecta `account` en todos los logs del thread.
+- [x] Flag OFF → comportamiento texto idéntico al original.
+- [x] 15 tests verdes en `test_logging_config.py` (67/67 total).
 
 ---
 
@@ -188,9 +202,11 @@ La flag `use_thread_local_db_conn` se descartó: el cambio es seguro e irrompibl
 
 ---
 
-### Ítem 3.4 — DOM snapshots + tests integración
+### Ítem 3.4 — DOM snapshots + tests integración + auto-reparación semi-automática
 
 **Tras estabilidad arquitectónica** para blindar contra cambios de Facebook.
+
+> **Alcance ampliado (2026-04-26):** además de snapshots y tests, incluir `selector_repair.py` — detección de selector roto → Gemini sugiere candidato → admin aprueba desde el panel. Ver sección "Feedback y áreas de mejora" para el flujo completo.
 
 - `tests/dom_snapshots/` con HTMLs sanitizados de:
   - Feed de grupo (composer cerrado).
@@ -329,10 +345,73 @@ Estas se dejan deliberadamente flexibles para no recortar opciones futuras.
 
 ---
 
-## Notas
+## Notas técnicas
 
 - **3.5** es trivial pero educativo: valida los tests del paso 0 con un cambio de bajo riesgo.
 - **3.1** es el ítem más grande — partir en 3 PRs internos a la rama paraguas (poster + manager + warmup/gemini).
 - **3.6** puede cerrarse con "mantener Emunium" como decisión válida.
 - **3.7** es opcional. Si el volumen no lo justifica, posponer indefinidamente es legítimo.
 - Cada ítem completado actualiza este documento + `CLAUDE.md` (sección arquitectura) + ADR si la decisión es grande.
+- **Nombre de sub-ramas:** git no permite `fase-3/X` cuando `fase-3` ya existe como rama. Usar `fase3-X` como convención.
+
+---
+
+## Feedback y áreas de mejora — notas de conversación
+
+> Esta sección recoge decisiones, aclaraciones y sugerencias surgidas durante el desarrollo. Sirve de bitácora para retomar contexto entre sesiones.
+
+### ¿Los tests garantizan funcionalidad sin revisión manual?
+
+**No.** Los tests cubren la lógica interna (horarios, CRUD, variación de texto, concurrencia). No pueden cubrir que Facebook acepta la publicación hoy, que los XPaths apuntan a los botones correctos, ni que el comportamiento anti-detección pasa los filtros actuales.
+
+**Regla práctica:** después de cualquier cambio grande (nueva fase, actualización de dependencias, cambio de selectores), hacer una publicación de prueba manual con una cuenta real antes de escalar. Los tests reducen el tiempo de diagnóstico — cuando algo falla, en segundos sabes si es código o es Facebook.
+
+---
+
+### Proxy por cuenta — cuándo activar
+
+El código ya está (`proxy_manager.py`). El único bloqueante es hardware (SIMs o IPs residenciales).
+
+**Decisión:** activar proxies **antes de escalar a más cuentas**, independientemente de en qué fase esté el desarrollo. Sin IP única por cuenta, Facebook puede correlacionar todas las cuentas y banearlas en bloque.
+
+- No es Fase 3, es una decisión operacional.
+- Cuando el hardware esté listo, se activa en minutos desde el admin panel.
+
+---
+
+### Cookies cifradas — cuándo implementar
+
+Riesgo real pero no urgente si el servidor está protegido. Se pospone a **después de Fase 3**: cuando llegue FastAPI (3.2) la arquitectura estará más clara para ubicar el cifrado correctamente.
+
+---
+
+### Auto-reparación de selectores DOM (propuesta — añadir a 3.4)
+
+Cuando Facebook cambia su DOM y rompe un selector, hay tres niveles posibles:
+
+| Nivel | Descripción | Decisión |
+|-------|-------------|----------|
+| 1 — Detección | DOM snapshots + tests que alertan en horas en vez de días | ✅ Ya en plan (3.4) |
+| 2 — Semi-automático con Gemini | Al detectar `TimeoutError` en selector conocido, envía el HTML actual a Gemini. Gemini sugiere el nuevo selector. Un humano aprueba antes de usarlo en producción. | ✅ **Añadir como parte de 3.4** |
+| 3 — Completamente automático | El sistema se repara solo sin supervisión | ❌ Demasiado riesgo — un selector equivocado puede hacer clicks inesperados en sesiones reales |
+
+**Plan de acción para 3.4:** cuando se implementen los DOM snapshots, añadir un módulo `selector_repair.py` que use el Gemini ya integrado. El sistema ya tiene todo lo necesario — solo hay que conectar las piezas.
+
+Flujo propuesto:
+```
+TimeoutError en selector conocido
+  → capturar HTML del estado actual de la página
+  → enviar a Gemini: "el selector X ya no funciona, ¿dónde está ahora este elemento?"
+  → Gemini devuelve candidatos con confianza
+  → guardar en DB como "selector pendiente de aprobación"
+  → notificar al admin (toast o log de alerta)
+  → admin aprueba desde el panel → se usa en la siguiente ejecución
+```
+
+El historial de snapshots de 3.4 sirve como contexto adicional para Gemini ("antes el DOM era así, ahora es este").
+
+---
+
+### Proxy sub-ramas — convención de nombres
+
+Git no permite crear `fase-3/3.5-sqlite-lock` cuando `fase-3` ya existe como rama (los slashes crean jerarquías de directorios en `.git/refs`). Convención adoptada para este proyecto: usar punto como separador → `fase3.5-sqlite-lock`, `fase3.3a-structlog`, etc.

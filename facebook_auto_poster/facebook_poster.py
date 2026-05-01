@@ -39,6 +39,7 @@ import proxy_manager
 import webhook
 from gemini_commenter import GeminiCommenter
 from human_browsing import HumanBrowsing
+from logging_config import bind_account, get_formatter, unbind_account
 from text_variation import TextVariator
 
 # ---------------------------------------------------------------------------
@@ -106,20 +107,17 @@ class FacebookPoster:
         # -- per-account logger ------------------------------------------
         self.logger = logging.getLogger(f"poster.{account.name}")
         self.logger.setLevel(logging.DEBUG)
+        self.logger.propagate = False  # evita duplicados en root handler
 
         os.makedirs(os.path.dirname(account.log_file), exist_ok=True)
         fh = logging.FileHandler(account.log_file, encoding="utf-8")
         fh.setLevel(logging.DEBUG)
-        fh.setFormatter(
-            logging.Formatter("%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
-        )
+        fh.setFormatter(get_formatter())
         self.logger.addHandler(fh)
 
         ch = logging.StreamHandler()
         ch.setLevel(logging.DEBUG)
-        ch.setFormatter(
-            logging.Formatter("%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
-        )
+        ch.setFormatter(get_formatter())
         self.logger.addHandler(ch)
 
         # -- screenshots dir ---------------------------------------------
@@ -844,6 +842,7 @@ class FacebookPoster:
     # ------------------------------------------------------------------ #
     def login(self) -> bool:
         """Inicia sesión en Facebook. Primero intenta con cookies guardadas."""
+        bind_account(self.account.name)
         self.logger.info("[Login] ── Iniciando sesión como %s ──", self.account.name)
         try:
             # --- [1] Intentar con cookies guardadas ----------------------
@@ -1303,6 +1302,7 @@ class FacebookPoster:
     # Cleanup
     # ------------------------------------------------------------------ #
     def close(self) -> None:
+        unbind_account()
         try:
             self.context.close()
         except Exception:
