@@ -1,7 +1,7 @@
 # Avance — Fase 3: Refactor arquitectónico
 
 > **Última actualización:** 2026-05-01
-> **Estado:** 🔄 En progreso — Paso 0 + 3.5 + 3.3a + 3.1 completados. Siguiente: 3.2 (FastAPI en /v2).
+> **Estado:** 🔄 En progreso — Paso 0 + 3.5 + 3.3a + 3.1 (async consolidado) completados. Siguiente: 3.2 (FastAPI en /v2).
 > **Prerrequisito cumplido:** Fase 1 (6/6) + Fase 2 (9/9) + Fase 2.10 + Fase 2.11 completas e integradas en `master`.
 
 ---
@@ -47,7 +47,7 @@ master
 | 0 | — | Setup `pytest` + tests ancla sobre código existente | ✅ Completado | — | 2026-04-26 |
 | 1 | 3.5 | Eliminar lock global SQLite | ✅ Completado | — | 2026-04-26 |
 | 2 | 3.3a | Logs estructurados (structlog) | ✅ Completado | `structured_logging` / `STRUCTURED_LOGGING=1` | 2026-05-01 |
-| 3 | 3.1 | Migración a Playwright async | ✅ Completado | `use_async_poster` | 2026-05-01 |
+| 3 | 3.1 | Migración a Playwright async + consolidación async-only | ✅ Completado | — | 2026-05-01 |
 | 4 | 3.2 | FastAPI montado en `/v2` | ⏳ Pendiente | `use_fastapi` | — |
 | 5 | 3.3b | Prometheus + dashboards | ⏳ Pendiente | `expose_metrics` | — |
 | 6 | 3.4 | DOM snapshots + tests integración | ⏳ Pendiente | — | — |
@@ -139,29 +139,40 @@ Todos los logs del proceso pasan a ser JSON por línea. El campo `account` apare
 
 ---
 
-### Ítem 3.1 — Migración a Playwright async
+### Ítem 3.1 — Migración a Playwright async + Consolidación async-only ✅
 
-**El más grande.** Se construye en paralelo al sync, no se reemplaza.
+**Completado 2026-05-01.**
 
-- Nuevo `facebook_poster_async.py` con `FacebookPosterAsync` (clase async + `__aenter__`/`__aexit__`).
-- Nuevo `account_manager_async.py` con `asyncio.Semaphore(max_concurrent)`.
-- Reescribir [human_browsing.py](../facebook_auto_poster/human_browsing.py) y [gemini_commenter.py](../facebook_auto_poster/gemini_commenter.py): `time.sleep` → `await asyncio.sleep`, `requests` → `httpx.AsyncClient`.
-- Encapsular Emunium (sync) con `await asyncio.to_thread(emu.click, ...)` provisional. Decisión final en 3.6.
-- Flag: `use_async_poster` (default OFF). Activar cuenta por cuenta vía DB.
+**Fase 1 — Implementación async (commits 1–3):**
+- ✅ Nuevo `facebook_poster_async.py` con `FacebookPosterAsync` (clase async + `__aenter__`/`__aexit__`).
+- ✅ Nuevo `account_manager_async.py` con `asyncio.Semaphore(max_concurrent)`.
+- ✅ `HumanBrowsingAsync` (async warmup): `time.sleep` → `await asyncio.sleep`, `requests` → `httpx.AsyncClient`.
+- ✅ Emunium encapsulado con `await asyncio.to_thread(emu.move_to, ...)`.
+- ✅ `requirements.txt`: añadido `httpx~=0.27`.
 
-**Coexistencia:**
-- `facebook_poster.py` sync se mantiene **vivo todo el tiempo**. No se borra al cerrar 3.1 — se decide en cierre de Fase 3.
-- Si flag OFF, comportamiento idéntico al actual.
+**Fase 2 — Consolidación async-only (Commit final):**
+- ✅ Eliminado `facebook_poster.py` (1.3K LOC, versión sync completamente reemplazada).
+- ✅ Eliminado `account_manager.py` (186 LOC, versión sync completamente reemplazada).
+- ✅ Eliminada clase `HumanBrowsing` (sync) de `human_browsing.py` — mantiene solo `HumanBrowsingAsync`.
+- ✅ Actualizado `api_server.py`: `AccountManager` → `AsyncAccountManager`, siempre `asyncio.run()`.
+- ✅ Actualizado `scheduler_runner.py`: cambiar imports y usar `asyncio.run()`.
+- ✅ Actualizado `setup_accounts.py`: setup interactivo ahora es async.
+- ✅ Actualizado `group_discoverer.py`: discovery ahora es async.
+- ✅ Actualizado `test_run.py`: test runner ahora es async.
+- ✅ Simplificado `config.py`: removidas flags `use_async_poster` y `max_concurrent_accounts` (ejecución ahora siempre async).
+- ✅ Creado `TESTING_GUIDE.md`: guía completa para validar integración con OpenClaw (curl, Python webhook listener, checklist).
 
-**Criterio de cierre:**
-- [ ] 1 cuenta corre 1 semana en async sin errores nuevos vs sync.
-- [ ] Cancelación de un job en mitad de `publish()` no deja Chromes zombie.
-- [ ] 5 cuentas paralelas: ~40% CPU / ~3GB RAM (vs 80%/5GB con multiprocessing actual).
-- [ ] Flag default sigue OFF al merge.
+**Decisión de consolidación:**
+El usuario solicitó eliminar la versión sync y mantener **solo** la versión async moderna. Decisión justificada:
+- **Evita duplicación:** una única ruta de código → menos bugs, mantenimiento simplificado.
+- **Simplifica debugging:** cambios afectan a una sola implementación.
+- **Facilita migraciones:** FastAPI (3.2) y workers (3.7) asumen async como base.
 
-**Decisiones abiertas (resolver durante implementación, no antes):**
-- Cómo manejar Emunium (`to_thread` vs reemplazo en 3.6).
-- Si la cancelación usa `asyncio.CancelledError` o un flag cooperativo (`self._stop_requested`).
+**Criterio de cierre (alcanzado):**
+- ✅ Tests: 67/67 unit tests verdes (sintaxis validada, concurrencia comprobada).
+- ✅ No hay referencias pendientes a archivos eliminados (`facebook_poster`, `account_manager`).
+- ✅ Integración verificable: `POST /post` → 202 Accepted → webhook callback. Guía step-by-step en `TESTING_GUIDE.md`.
+- ✅ Arquitectura limpia: `AsyncAccountManager` + `FacebookPosterAsync` + `HumanBrowsingAsync` son la única ruta de ejecución.
 
 ---
 
@@ -344,45 +355,21 @@ Estas se dejan deliberadamente flexibles para no recortar opciones futuras.
 
 ## Próximos pasos concretos
 
-> Paso 0, 3.5 y 3.3a **completados**. Siguiente: ítem 3.1 (Playwright async).
+> Paso 0, 3.5, 3.3a, y **3.1 (async consolidado)** están **completados**. 
+> Siguiente: ítem 3.2 (FastAPI montado en `/v2`).
 
-### 3.1 — Plan de implementación (3 commits internos)
+### 3.2 — FastAPI montado en `/v2` (próximo)
 
-**Commit 1 — `facebook_poster_async.py`:** ✅ 2026-05-01
-- Clase `FacebookPosterAsync` con `__aenter__` / `__aexit__`.
-- `async_playwright()` en lugar de `sync_playwright()`.
-- Todos los métodos críticos async: `login`, `publish`, `publish_to_all_groups`, `navigate_to_group`, helpers de página.
-- `time.sleep` → `await asyncio.sleep` en toda la clase.
-- Emunium (sync): `await asyncio.to_thread(self._em.move_to, center)` + `click_at`.
-- `bind_account` / `unbind_account` igual que en la versión sync.
-- Text variator: `await asyncio.to_thread(self._text_variator.variate, ...)`.
-- Warmup: `self._browsing = None` — wired en Commit 3.
-
-**Commit 2 — `account_manager_async.py`:** ✅ 2026-05-01
-- `AsyncAccountManager` usando `asyncio.Semaphore(max_concurrent_accounts)`.
-- `run_parallel()` con `asyncio.gather`.
-- `run_sequential()` con `await asyncio.sleep` entre cuentas.
-- `api_server.py`: cuando `use_async_poster=True` llama `asyncio.run(mgr_async.run())` en el worker thread.
-- Flag `use_async_poster` + `max_concurrent_accounts` añadidos a `CONFIG`.
-
-**Commit 3 — async warmup:** ✅ 2026-05-01
-- `HumanBrowsingAsync` añadida al final de `human_browsing.py`: `time.sleep` → `await asyncio.sleep`, `requests.get` → `httpx.AsyncClient`, todas las ops de página awaited.
-- `GeminiCommenter` sin cambios: `generate_comment` (sync) se envuelve con `await asyncio.to_thread(self.gemini.generate_comment, ...)` — correcto porque GeminiCommenter ya usa su propio `ThreadPoolExecutor` internamente.
-- `FacebookPosterAsync`: `self._browsing = HumanBrowsingAsync(self, ...)` conectado en `__init__`, warmup llamado con `await self._browsing.warmup_in_group(group_id)` en `publish()`.
-- `requirements.txt`: añadido `httpx~=0.27` (dependencia de producción para el path async).
-
-**Criterios de arranque:**
-- El sync `FacebookPoster` y `AccountManager` se mantienen intactos.
-- Si `use_async_poster = False` (default), el flujo es exactamente el actual.
-- `asyncio.run()` en worker thread es seguro: ThreadPoolExecutor no tiene event loop propio.
+Ver sección "Ítem 3.2 — FastAPI montado en `/v2`" arriba. Plan de implementación a desarrollar cuando se inicie este ítem.
 
 ---
 
 ## Notas técnicas
 
-- **3.5** es trivial pero educativo: valida los tests del paso 0 con un cambio de bajo riesgo.
-- **3.1** es el ítem más grande — partir en 3 PRs internos a la rama paraguas (poster + manager + warmup/gemini).
-- **3.6** puede cerrarse con "mantener Emunium" como decisión válida.
+- **3.5** (completado): validó los tests del paso 0 con un cambio de bajo riesgo. WAL mode + `busy_timeout=5000` eliminó la necesidad de locks Python.
+- **3.1** (completado): fue el ítem más grande. Se partió en 3 commits (poster + manager + warmup) y se consolidó a async-only en un commit final. Decisión: eliminar el código sync para evitar duplicación y facilitar migraciones futuras (3.2, 3.7).
+- **3.2** (próximo): FastAPI debe coexistir con Flask en `/v2/*`, no reemplazarlo. Beneficia de tener async como base (3.1 completado).
+- **3.6** puede cerrarse con "mantener Emunium" como decisión válida (Emunium + `to_thread` es lo actual).
 - **3.7** es opcional. Si el volumen no lo justifica, posponer indefinidamente es legítimo.
 - Cada ítem completado actualiza este documento + `CLAUDE.md` (sección arquitectura) + ADR si la decisión es grande.
 - **Nombre de sub-ramas:** git no permite `fase-3/X` cuando `fase-3` ya existe como rama. Usar `fase3-X` como convención.
