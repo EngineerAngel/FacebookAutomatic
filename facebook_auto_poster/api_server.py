@@ -410,12 +410,22 @@ def _run_job(job_id: str, accounts, text: str,
             webhook.fire(callback_url, job_id, "failed", error_msg=msg)
             return
 
-        mgr = AccountManager(
-            runnable, CONFIG, text,
-            image_path=image_path, callback_url=callback_url,
-        )
-        results = mgr.run()
-        mgr.print_summary(results)
+        if CONFIG.get("use_async_poster", False):
+            import asyncio
+            from account_manager_async import AsyncAccountManager
+            mgr_async = AsyncAccountManager(
+                runnable, CONFIG, text,
+                image_path=image_path, callback_url=callback_url,
+            )
+            results = asyncio.run(mgr_async.run())
+            AsyncAccountManager.print_summary(results)
+        else:
+            mgr = AccountManager(
+                runnable, CONFIG, text,
+                image_path=image_path, callback_url=callback_url,
+            )
+            results = mgr.run()
+            mgr.print_summary(results)
         job_store.mark_done(job_id, results)
         webhook.fire(callback_url, job_id, "done", results)
     except Exception:

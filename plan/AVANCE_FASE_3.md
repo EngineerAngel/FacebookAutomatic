@@ -1,7 +1,7 @@
 # Avance — Fase 3: Refactor arquitectónico
 
-> **Última actualización:** 2026-04-26
-> **Estado:** ⏳ No iniciada — plan de ejecución preparado, pendiente luz verde para crear rama
+> **Última actualización:** 2026-05-01
+> **Estado:** 🔄 En progreso — Paso 0 + 3.5 + 3.3a + 3.1 completados. Siguiente: 3.2 (FastAPI en /v2).
 > **Prerrequisito cumplido:** Fase 1 (6/6) + Fase 2 (9/9) + Fase 2.10 + Fase 2.11 completas e integradas en `master`.
 
 ---
@@ -47,7 +47,7 @@ master
 | 0 | — | Setup `pytest` + tests ancla sobre código existente | ✅ Completado | — | 2026-04-26 |
 | 1 | 3.5 | Eliminar lock global SQLite | ✅ Completado | — | 2026-04-26 |
 | 2 | 3.3a | Logs estructurados (structlog) | ✅ Completado | `structured_logging` / `STRUCTURED_LOGGING=1` | 2026-05-01 |
-| 3 | 3.1 | Migración a Playwright async | ⏳ Pendiente | `use_async_poster` | — |
+| 3 | 3.1 | Migración a Playwright async | ✅ Completado | `use_async_poster` | 2026-05-01 |
 | 4 | 3.2 | FastAPI montado en `/v2` | ⏳ Pendiente | `use_fastapi` | — |
 | 5 | 3.3b | Prometheus + dashboards | ⏳ Pendiente | `expose_metrics` | — |
 | 6 | 3.4 | DOM snapshots + tests integración | ⏳ Pendiente | — | — |
@@ -129,6 +129,13 @@ Todos los logs del proceso pasan a ser JSON por línea. El campo `account` apare
 - [x] `bind_account` inyecta `account` en todos los logs del thread.
 - [x] Flag OFF → comportamiento texto idéntico al original.
 - [x] 15 tests verdes en `test_logging_config.py` (67/67 total).
+
+**Notas de implementación (2026-05-01) — gotchas para futuras sesiones:**
+- `bind_account` se llama en `login()`, **no en `__init__`**: `__init__` corre en el thread del llamador, pero el contexto de structlog (`contextvars`) es thread-local; `login()` ya corre en el worker thread donde viven los logs de la sesión.
+- `self.logger.propagate = False` en el `FileHandler` por cuenta: sin esto, cada log aparece dos veces — una en el archivo de cuenta y otra en el root handler (consola/main.log).
+- `bind_account` / `unbind_account` son no-ops cuando `_structured = False` — se pueden llamar incondicionalmente sin comprobar el flag en el caller.
+- `structlog.contextvars` no es lo mismo que `structlog.threadlocal` (API antigua). Usar siempre `bind_contextvars` / `unbind_contextvars` / `clear_contextvars` de `structlog.contextvars`.
+- `ProcessorFormatter` de structlog intercepts stdlib `LogRecord`s — ningún `logger.info()` existente necesita cambios para producir JSON.
 
 ---
 
@@ -335,13 +342,39 @@ Estas se dejan deliberadamente flexibles para no recortar opciones futuras.
 
 ---
 
-## Próximos pasos concretos (cuando se dé luz verde)
+## Próximos pasos concretos
 
-1. `git checkout -b fase-3` desde `master`.
-2. Crear `facebook_auto_poster/tests/conftest.py` + estructura `unit/` `integration/`.
-3. Crear `requirements-dev.txt` con `pytest~=8.0`, `pytest-asyncio~=0.23`, `pytest-cov~=5.0`, `httpx~=0.27`.
-4. Implementar los ≥10 tests ancla del Paso 0.
-5. Abrir sub-branch `fase-3/3.5-sqlite-lock` como primer ejercicio de validación del flujo.
+> Paso 0, 3.5 y 3.3a **completados**. Siguiente: ítem 3.1 (Playwright async).
+
+### 3.1 — Plan de implementación (3 commits internos)
+
+**Commit 1 — `facebook_poster_async.py`:** ✅ 2026-05-01
+- Clase `FacebookPosterAsync` con `__aenter__` / `__aexit__`.
+- `async_playwright()` en lugar de `sync_playwright()`.
+- Todos los métodos críticos async: `login`, `publish`, `publish_to_all_groups`, `navigate_to_group`, helpers de página.
+- `time.sleep` → `await asyncio.sleep` en toda la clase.
+- Emunium (sync): `await asyncio.to_thread(self._em.move_to, center)` + `click_at`.
+- `bind_account` / `unbind_account` igual que en la versión sync.
+- Text variator: `await asyncio.to_thread(self._text_variator.variate, ...)`.
+- Warmup: `self._browsing = None` — wired en Commit 3.
+
+**Commit 2 — `account_manager_async.py`:** ✅ 2026-05-01
+- `AsyncAccountManager` usando `asyncio.Semaphore(max_concurrent_accounts)`.
+- `run_parallel()` con `asyncio.gather`.
+- `run_sequential()` con `await asyncio.sleep` entre cuentas.
+- `api_server.py`: cuando `use_async_poster=True` llama `asyncio.run(mgr_async.run())` en el worker thread.
+- Flag `use_async_poster` + `max_concurrent_accounts` añadidos a `CONFIG`.
+
+**Commit 3 — async warmup:** ✅ 2026-05-01
+- `HumanBrowsingAsync` añadida al final de `human_browsing.py`: `time.sleep` → `await asyncio.sleep`, `requests.get` → `httpx.AsyncClient`, todas las ops de página awaited.
+- `GeminiCommenter` sin cambios: `generate_comment` (sync) se envuelve con `await asyncio.to_thread(self.gemini.generate_comment, ...)` — correcto porque GeminiCommenter ya usa su propio `ThreadPoolExecutor` internamente.
+- `FacebookPosterAsync`: `self._browsing = HumanBrowsingAsync(self, ...)` conectado en `__init__`, warmup llamado con `await self._browsing.warmup_in_group(group_id)` en `publish()`.
+- `requirements.txt`: añadido `httpx~=0.27` (dependencia de producción para el path async).
+
+**Criterios de arranque:**
+- El sync `FacebookPoster` y `AccountManager` se mantienen intactos.
+- Si `use_async_poster = False` (default), el flujo es exactamente el actual.
+- `asyncio.run()` en worker thread es seguro: ThreadPoolExecutor no tiene event loop propio.
 
 ---
 

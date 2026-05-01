@@ -16,15 +16,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | File | Responsibility |
 |------|---------------|
 | `config.py` | ENV loading, `AccountConfig` dataclass, fingerprint + timezone helpers |
-| `job_store.py` | SQLite schema, all DB operations |
+| `job_store.py` | SQLite schema, all DB operations (WAL mode, no threading.Lock) |
 | `facebook_poster.py` | Patchright login + publish (one instance per account) |
 | `account_manager.py` | Orchestrates sequential / parallel sessions |
 | `api_server.py` | Flask REST API + admin panel |
 | `scheduler_runner.py` | Daemon that polls for scheduled jobs every 30s |
 | `main.py` | Entry point (API + scheduler) |
+| `logging_config.py` | Central logging setup — text mode or structured JSON (structlog) |
 | `gemini_commenter.py` | Gemini API integration (human-like comments during warmup) |
-| `human_browsing.py` | Feed warmup before posting |
+| `human_browsing.py` | Feed warmup before posting (`HumanBrowsing` sync + `HumanBrowsingAsync`) |
 | `webhook.py` | Async callbacks to OpenClaw |
+| `facebook_poster_async.py` | Async counterpart of `facebook_poster.py` — flag `use_async_poster` |
+| `account_manager_async.py` | Async counterpart of `account_manager.py` — `asyncio.Semaphore` |
 
 ## Running
 
@@ -61,7 +64,34 @@ Scheduled jobs: POST /schedule → DB → scheduler_runner (every 30s) → same 
 - **Typing**: log-normal delays, 1.5% typo rate with grouped correction (1–3 chars), 2% micro-pauses
 - **Active hours**: per-account `(start, end)` tuple + `ZoneInfo` timezone — evaluated at execution time
 
-### Database Schema (SQLite WAL, `threading.Lock` protected)
+### Logging (`logging_config.py`)
+
+Centralised logging setup — all modules call `logging.getLogger(name)` as usual; `logging_config` controls the output format.
+
+**Two modes, switched by env var or `CONFIG["structured_logging"]`:**
+
+| Mode | Activate | Output |
+|------|----------|--------|
+| Text (default) | `STRUCTURED_LOGGING=0` (or unset) | `2026-05-01 12:00:00 - [poster.elena] - INFO - mensaje` |
+| JSON | `STRUCTURED_LOGGING=1` | `{"event":"...", "level":"info", "logger":"poster.elena", "account":"elena", "timestamp":"..."}` |
+
+**Public API:**
+```python
+from logging_config import setup_logging, bind_account, unbind_account, get_formatter
+
+setup_logging(structured=True, log_dir=Path("logs"))   # call once at startup (main.py)
+bind_account("elena")     # inject account field into every log from this thread
+unbind_account()          # clear thread-local context (called in FacebookPoster.close())
+get_formatter()           # returns the active formatter — used by per-account file handlers
+```
+
+**Key design decisions (gotchas):**
+- `bind_account` is called inside `login()`, not `__init__`, because `__init__` runs in the calling thread while `login()` runs in the worker thread — `structlog.contextvars` are thread-local.
+- Per-account `FileHandler` sets `logger.propagate = False` to prevent duplicate lines in the root handler.
+- `bind_account` / `unbind_account` are no-ops when `structured_logging=False` — safe to call unconditionally.
+- On Windows, `STRUCTURED_LOGGING=1` requires `structlog~=24.0` (already in `requirements.txt`). Tests require `tzdata~=2024.0` (in `requirements-dev.txt`) because Windows Python has no built-in IANA timezone database.
+
+### Database Schema (SQLite WAL — no Python lock)
 
 | Table | Purpose |
 |-------|---------|
@@ -185,7 +215,7 @@ sqlite3 facebook_auto_poster/jobs.db "SELECT id, status FROM jobs ORDER BY creat
 | 🟡 Medium | Flask dev server in production (no WSGI) | 2.4 (`waitress`) |
 | 🟡 Medium | Dependencies unpinned (`>=` only, no lock file) | 2.5 (`pip freeze`) |
 | 🟢 Low | Rate limiter in-memory (resets on restart) | 2.6 (SQLite-backed) |
-| 🟢 Low | `sync_playwright` + threading not officially thread-safe | 3.1 (async migration) |
+| 🟢 Low | `sync_playwright` + threading (not officially thread-safe) | 3.1 (async migration, in progress) |
 
 ## Improvement Plan
 
@@ -194,11 +224,12 @@ Three phases tracked in `plan/` directory:
 | Phase | Status | Focus |
 |-------|--------|-------|
 | **Fase 1** (stop-the-bleeding) | 3/6 complete | Identity isolation per account |
-| **Fase 2** (hardening) | 0/9 | Production stability |
-| **Fase 3** (refactor) | 0/7 | Async + FastAPI + observability |
+| **Fase 2** (hardening) | complete | Production stability |
+| **Fase 3** (refactor) | 3/7 in progress | Async + FastAPI + observability |
 
-**Completed:** 1.3 (fingerprints), 1.4 (timezone/active hours), 1.5 (typo rate)
-**Pending critical:** 1.1 (proxies), 1.2 (crypto passwords), 2.4 (waitress), 2.5 (pin deps)
+**Fase 1 completed:** 1.3 (fingerprints), 1.4 (timezone/active hours), 1.5 (typo rate)
+**Fase 3 completed:** Paso 0 (pytest + 67 tests), 3.5 (SQLite WAL / remove lock), 3.3a (structlog JSON logging), 3.1 (Playwright async)
+**Fase 3 next:** 3.2 (FastAPI en /v2)
 
 See `plan/AVANCE_FASE_*.md` for detailed task tracking.
 
