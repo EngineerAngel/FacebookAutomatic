@@ -179,7 +179,7 @@ sqlite3 facebook_auto_poster/jobs.db "SELECT id, status FROM jobs ORDER BY creat
 
 | Severity | Issue | Plan item |
 |----------|-------|-----------|
-| 🔴 Critical | All accounts share same IP — cluster-ban risk | 1.1 (proxy pool, needs hardware) |
+| ~~🔴 Critical~~ | ~~All accounts share same IP — cluster-ban risk~~ | 1.1 ✅ resuelto — ver Proxy Pool SIM |
 | 🔴 Critical | Session cookies stored unencrypted in SQLite | 2.8 (Fernet encryption) |
 | 🟡 Medium | Single `FB_PASSWORD` for all accounts | 1.2 (individual encrypted passwords) |
 | 🟡 Medium | Flask dev server in production (no WSGI) | 2.4 (`waitress`) |
@@ -189,18 +189,76 @@ sqlite3 facebook_auto_poster/jobs.db "SELECT id, status FROM jobs ORDER BY creat
 
 ## Improvement Plan
 
-Three phases tracked in `plan/` directory:
+Las fases (1/2/3) se desarrollan en otra rama por otro equipo. Esta rama (`produccion_temp`) contiene fixes provisionales.
 
-| Phase | Status | Focus |
-|-------|--------|-------|
-| **Fase 1** (stop-the-bleeding) | 3/6 complete | Identity isolation per account |
-| **Fase 2** (hardening) | 0/9 | Production stability |
-| **Fase 3** (refactor) | 0/7 | Async + FastAPI + observability |
+Documentacion de verificacion de bugs en `docs/`:
+- `docs/VERIFICACION_TEMPLATES.md` — 10 bugs del sistema de plantillas
+- `docs/VERIFICACION_PROXIES.md` — 11 bugs del sistema de proxies + tunel
+- `docs/VERIFICACION_GENERAL.md` — 10 bugs generales (admin, DB, grupos, horario)
+- `docs/PROXY_SYSTEM.md` — Referencia tecnica del sistema de proxies SIM
 
-**Completed:** 1.3 (fingerprints), 1.4 (timezone/active hours), 1.5 (typo rate)
-**Pending critical:** 1.1 (proxies), 1.2 (crypto passwords), 2.4 (waitress), 2.5 (pin deps)
+## Proxy Pool SIM (plan 1.1 — implementado)
 
-See `plan/AVANCE_FASE_*.md` for detailed task tracking.
+Cada cuenta de Facebook usa la IP de un teléfono físico con SIM, conectado por **USB tethering** al servidor. El tráfico del navegador Chromium se enruta a través del proxy SOCKS5 del teléfono; el resto del sistema (API, panel, webhooks) sigue usando WiFi.
+
+### Arquitectura de red
+
+```
+Servidor (ASUS TUF)
+  ├─ wlo1  (WiFi Totalplay)   → API Flask, panel admin, webhooks
+  └─ enx*  (USB tethering)    → SOCKS5 proxy → SIM del teléfono → Facebook
+```
+
+### Herramienta de gestión
+
+```bash
+./setup_phone_proxy.sh                    # escaneo automático
+./setup_phone_proxy.sh --add              # agregar teléfono nuevo
+./setup_phone_proxy.sh --status           # health check de todos los nodos
+./setup_phone_proxy.sh --test socks5://IP:PORT
+./setup_phone_proxy.sh --assign NODE CUENTA
+```
+
+### Nodos activos
+
+| ID | SIM | Cuentas asignadas |
+|----|-----|-------------------|
+| `pillofon_1` | Pillofon (APN personalizado) | andrea_zalazar, anna_marit, carmen_carrillo, sandra_gonzalez |
+
+### Configuración del sistema (persistente)
+
+El USB tethering toma la ruta por defecto automáticamente vía DHCP. Para evitarlo:
+
+1. **NetworkManager** — perfil `"Conexión cableada 2"` tiene `ipv4.never-default yes`
+2. **Dispatcher script** — `/etc/NetworkManager/dispatcher.d/99-no-usb-default-route` elimina la ruta por defecto de cualquier interfaz `usb*/rndis*/enx*/enu*` al conectarse
+
+### Pillofon — APN requerido
+
+El APN por defecto de Pillofon enruta por la misma infraestructura que el servidor (ambos obtienen la misma IP pública). Cambiar el APN manualmente en el teléfono soluciona esto y asigna una IP SIM diferente.
+
+### Agregar un teléfono nuevo
+
+1. Instalar **Every Proxy** (Android) → Protocol: SOCKS5, Port: 1080
+2. Desactivar WiFi en el teléfono (solo datos SIM)
+3. Activar "Anclaje USB" en el teléfono
+4. Conectar cable USB al servidor
+5. Ejecutar `./setup_phone_proxy.sh --add`
+
+## Metodologia de Trabajo
+
+1. **Mapear el impacto antes de tocar codigo** — Identificar exactamente que archivos consume cada cambio: ruta → vista → JS del cliente.
+2. **Cambiar de adentro hacia afuera** — Primero el modelo/ruta (backend), luego la vista, luego el JS del cliente. Nunca al reves.
+3. **Un cambio por commit** — Cada modificacion en su propio commit con mensaje claro. Si algo se rompe, `git diff` muestra exactamente que cambio y `git revert` es quirurgico.
+4. **Verificar el contrato de la API antes y despues** — Anotar que devuelve actualmente cada endpoint y que se espera que devuelva. El JS del cliente depende de esa estructura.
+5. **Probar el flujo completo, no solo la parte modificada** — Si se cambia un componente, verificar que los componentes relacionados (que comparten la misma logica) no se rompen.
+
+### Orden de cambios recomendado:
+1. Leer todos los archivos afectados
+2. Hacer el cambio en backend (route/model)
+3. Hacer el cambio en la vista
+4. Hacer el cambio en el JS del cliente
+5. Verificar que el resto de tabs/secciones no se rompieron
+6. Commit
 
 ## For Next Session
 
