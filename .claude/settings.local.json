@@ -8,7 +8,8 @@
       "Bash(python -c \"from facebook_auto_poster.facebook_poster import FacebookPoster; print\\('[OK] Import OK'\\)\")",
       "Bash(python -c \"from facebook_poster import FacebookPoster; print\\('[OK]'\\)\")",
       "Bash(git commit -m ' *)",
-      "Bash(python -)"
+      "Bash(python -)",
+      "Bash(python -m pytest facebook_auto_poster/tests/unit/ -v --tb=short)"
     ]
   }
 }

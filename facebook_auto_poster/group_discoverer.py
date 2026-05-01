@@ -5,9 +5,10 @@ Ejecuta el script de plan/grupos.md (DOM scraping seguro, sin API calls).
 Navega a facebook.com/groups/joined, hace scroll y extrae IDs.
 """
 
+import asyncio
 import logging
 from config import AccountConfig, CONFIG
-from facebook_poster import FacebookPoster
+from facebook_poster_async import FacebookPosterAsync
 
 logger = logging.getLogger("group_discoverer")
 
@@ -35,7 +36,7 @@ DISCOVERY_JS = """
 """
 
 
-def discover_groups_for_account(account: AccountConfig, config: dict) -> list[dict]:
+async def discover_groups_for_account(account: AccountConfig, config: dict) -> list[dict]:
     """
     Descubre grupos de una cuenta navegando a facebook.com/groups/joined,
     haciendo scroll y ejecutando el script de grupos.md.
@@ -43,26 +44,24 @@ def discover_groups_for_account(account: AccountConfig, config: dict) -> list[di
     Retorna: [{id: "123456", name: "Grupo X"}, ...]
     Lanza excepción si falla (el caller guarda el error en DB).
     """
-    poster = FacebookPoster(account, config)
-    try:
-        logger.info(f"[{account.name}] Navegando a groups feed...")
-        poster.page.goto("https://www.facebook.com/groups/joins/", timeout=30000)
+    async with FacebookPosterAsync(account, config) as poster:
+        try:
+            logger.info(f"[{account.name}] Navegando a groups feed...")
+            await poster.page.goto("https://www.facebook.com/groups/joins/", timeout=30000)
 
-        logger.info(f"[{account.name}] Haciendo scroll para cargar grupos...")
-        for i in range(10):
-            poster.page.evaluate("window.scrollBy(0, window.innerHeight)")
-            poster.page.wait_for_timeout(1000)
-            if i % 3 == 0:
-                logger.debug(f"[{account.name}] Scroll {i+1}/10...")
+            logger.info(f"[{account.name}] Haciendo scroll para cargar grupos...")
+            for i in range(10):
+                await poster.page.evaluate("window.scrollBy(0, window.innerHeight)")
+                await poster.page.wait_for_timeout(1000)
+                if i % 3 == 0:
+                    logger.debug(f"[{account.name}] Scroll {i+1}/10...")
 
-        logger.info(f"[{account.name}] Ejecutando script de extracción...")
-        results = poster.page.evaluate(DISCOVERY_JS)
+            logger.info(f"[{account.name}] Ejecutando script de extracción...")
+            results = await poster.page.evaluate(DISCOVERY_JS)
 
-        logger.info(f"[{account.name}] {len(results) if results else 0} grupos encontrados")
-        return results if results else []
+            logger.info(f"[{account.name}] {len(results) if results else 0} grupos encontrados")
+            return results if results else []
 
-    except Exception as e:
-        logger.error(f"[{account.name}] Error descubriendo grupos: {e}")
-        raise
-    finally:
-        poster.close()
+        except Exception as e:
+            logger.error(f"[{account.name}] Error descubriendo grupos: {e}")
+            raise

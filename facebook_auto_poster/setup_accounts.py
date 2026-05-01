@@ -9,11 +9,12 @@ Uso:
     python setup_accounts.py zofia     → configura solo una cuenta
 """
 
+import asyncio
 import logging
 import sys
 
 from config import CONFIG, load_accounts
-from facebook_poster import FacebookPoster
+from facebook_poster_async import FacebookPosterAsync
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,16 +23,13 @@ logging.basicConfig(
 logger = logging.getLogger("setup")
 
 
-def setup_account(account, config) -> bool:
+async def setup_account(account, config) -> bool:
     """Hace login para una cuenta y guarda las cookies."""
-    poster = FacebookPoster(account, config)
-    try:
-        return poster.setup_interactive()
-    finally:
-        poster.close()
+    async with FacebookPosterAsync(account, config) as poster:
+        return await poster.setup_interactive()
 
 
-def main():
+async def main():
     accounts = load_accounts()
 
     # Filtrar por nombre si se pasa como argumento
@@ -46,7 +44,7 @@ def main():
 
     results = {}
     for account in accounts:
-        success = setup_account(account, CONFIG)
+        success = await setup_account(account, CONFIG)
         results[account.name] = success
         print()
 
@@ -61,4 +59,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

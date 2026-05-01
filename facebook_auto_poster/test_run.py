@@ -4,6 +4,7 @@ test_run.py — Ejecuta una publicación de prueba inmediatamente.
 No espera al programador. Puedes usar solo la primera cuenta.
 """
 
+import asyncio
 import logging
 import os
 import sys
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import job_store
 from config import CONFIG, load_accounts
-from account_manager import AccountManager
+from account_manager_async import AsyncAccountManager
 
 # Configurar logging básico
 logging.basicConfig(
@@ -22,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger("test_run")
 
 
-def main() -> None:
+async def main() -> None:
     logger.info("=== Iniciando prueba de publicación ===\n")
 
     job_store.init_db()
@@ -85,17 +86,17 @@ def main() -> None:
         sys.exit(1)
 
     # Ejecutar para esta cuenta única
-    manager = AccountManager([account], CONFIG, text, image_path=image_path)
+    manager = AsyncAccountManager([account], CONFIG, text, image_path=image_path)
     logger.info("\nIniciando sesión de publicación...\n")
     try:
-        results = manager.run()
+        results = await manager.run()
     except ValueError as exc:
         logger.error("No se pudo publicar: %s", exc)
         sys.exit(1)
 
     logger.info("\n=== Resultados de la prueba ===\n")
-    manager.print_summary(results)
+    AsyncAccountManager.print_summary(results)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -52,11 +52,6 @@ CONFIG: dict = {
     "text_variation_mode": "gemini",  # "gemini" | "zero_width" | "off"
     "structured_logging": os.getenv("STRUCTURED_LOGGING", "0").strip() == "1",
 
-    # Fase 3.1 — async poster (default OFF; flip to True per account to test)
-    "use_async_poster": os.getenv("USE_ASYNC_POSTER", "0").strip() == "1",
-    # Max accounts running in parallel when use_async_poster=True + execution_mode=parallel
-    "max_concurrent_accounts": int(os.getenv("MAX_CONCURRENT_ACCOUNTS", "3")),
-
     "execution_mode": os.getenv("EXECUTION_MODE", "sequential").strip().lower(),
     "api_port": int(os.getenv("API_PORT", "5000")),
     # Pool de workers (Fase 2.3): cuántos jobs (cada uno con potencialmente

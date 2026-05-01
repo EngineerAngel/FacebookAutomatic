@@ -6,6 +6,7 @@ un hilo por cada job due. Usa el mismo _run_job de api_server
 para garantizar comportamiento idéntico (SQLite + webhook).
 """
 
+import asyncio
 import logging
 import threading
 import time
@@ -14,7 +15,7 @@ from datetime import datetime
 from config import CONFIG, load_accounts
 import job_store
 import webhook
-from account_manager import AccountManager
+from account_manager_async import AsyncAccountManager
 
 POLL_SECONDS = 30
 
@@ -65,12 +66,12 @@ def _run_scheduled_job(job: dict) -> None:
                 job_id, [a.name for a in accounts])
 
     try:
-        mgr = AccountManager(
+        mgr = AsyncAccountManager(
             accounts, CONFIG, text,
             image_path=image_path, callback_url=callback_url,
         )
-        results = mgr.run()
-        mgr.print_summary(results)
+        results = asyncio.run(mgr.run())
+        AsyncAccountManager.print_summary(results)
         job_store.mark_done(job_id, results)
         webhook.fire(callback_url, job_id, "done", results)
     except Exception:
