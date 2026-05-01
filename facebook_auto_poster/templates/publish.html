@@ -256,6 +256,58 @@ select { color-scheme: dark; }
 
 .hint { font-size: 0.775rem; color: #475569; margin-top: 0.4rem; }
 
+/* ─── Image previews (multi-foto) ─── */
+.image-previews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+}
+.image-preview-item {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  border: 1px solid #2d3148;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #0f1117;
+}
+.image-preview-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.image-preview-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fca5a5;
+  border: none;
+  font-size: 0.85rem;
+  font-weight: bold;
+  cursor: pointer;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.image-preview-remove:hover { background: #7f1d1d; color: #fff; }
+.image-preview-index {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #e2e8f0;
+  font-size: 0.7rem;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
 /* ─── Account/Group selection ─── */
 .account-item {
   background: #252837;
@@ -344,9 +396,10 @@ tr:last-child td { border-bottom: none; }
         </div>
 
         <div class="field">
-          <label class="field-label" for="custom-image">Imagen (opcional)</label>
-          <input type="file" id="custom-image" accept=".jpg,.jpeg,.png,.gif,.webp">
-          <p class="hint">Formatos: jpg, jpeg, png, gif, webp</p>
+          <label class="field-label" for="custom-image">Imágenes (opcional, máx 5)</label>
+          <input type="file" id="custom-image" accept=".jpg,.jpeg,.png,.gif,.webp" multiple onchange="handleCustomImageChange()">
+          <p class="hint">Formatos: jpg, jpeg, png, gif, webp · Hasta 5 imágenes (carrusel)</p>
+          <div id="custom-image-previews" class="image-previews"></div>
         </div>
 
         <button class="btn btn-secondary" onclick="createFromManual()">Crear publicación personalizada</button>
@@ -665,31 +718,61 @@ function showTemplatePreview(tplId) {
     body.appendChild(urlDiv);
   }
 
-  // Sección IMAGEN — VALIDAR ORIGEN
-  if (tpl.image_path && typeof tpl.image_path === 'string' && tpl.image_path.startsWith('/')) {
+  // Sección IMÁGENES — soporta image_paths (lista) o image_path (legacy)
+  let imgPaths = [];
+  if (Array.isArray(tpl.image_paths)) {
+    imgPaths = tpl.image_paths;
+  } else if (typeof tpl.image_path === 'string' && tpl.image_path) {
+    imgPaths = [tpl.image_path];
+  }
+  imgPaths = imgPaths.filter(p => typeof p === 'string' && p.startsWith('/'));
+
+  if (imgPaths.length > 0) {
     const imgDiv = document.createElement('div');
     imgDiv.style.marginBottom = '1rem';
 
     const imgLabel = document.createElement('strong');
-    imgLabel.textContent = 'Imagen:';
+    imgLabel.textContent = imgPaths.length > 1 ? `Imágenes (${imgPaths.length}):` : 'Imagen:';
     imgDiv.appendChild(imgLabel);
     imgDiv.appendChild(document.createElement('br'));
 
-    const img = document.createElement('img');
-    img.src = tpl.image_path;
-    img.style.maxWidth = '100%';
-    img.style.borderRadius = '6px';
-    img.style.maxHeight = '400px';
+    const grid = document.createElement('div');
+    grid.style.display = 'flex';
+    grid.style.flexWrap = 'wrap';
+    grid.style.gap = '0.5rem';
+    grid.style.marginTop = '0.5rem';
 
-    img.onerror = () => {
-      img.style.display = 'none';
-      const errMsg = document.createElement('p');
-      errMsg.style.color = '#fca5a5';
-      errMsg.textContent = '(imagen no disponible)';
-      imgDiv.appendChild(errMsg);
-    };
+    imgPaths.forEach(src => {
+      const wrap = document.createElement('div');
+      wrap.style.position = 'relative';
+      wrap.style.width = '120px';
+      wrap.style.height = '120px';
+      wrap.style.border = '1px solid #2d3148';
+      wrap.style.borderRadius = '6px';
+      wrap.style.overflow = 'hidden';
+      wrap.style.background = '#0f1117';
 
-    imgDiv.appendChild(img);
+      const img = document.createElement('img');
+      img.src = src;
+      img.style.width = '100%';
+      img.style.height = '100%';
+      img.style.objectFit = 'cover';
+
+      img.onerror = () => {
+        wrap.innerHTML = '';
+        const errMsg = document.createElement('p');
+        errMsg.style.color = '#fca5a5';
+        errMsg.style.fontSize = '0.7rem';
+        errMsg.style.padding = '0.5rem';
+        errMsg.textContent = '(no disponible)';
+        wrap.appendChild(errMsg);
+      };
+
+      wrap.appendChild(img);
+      grid.appendChild(wrap);
+    });
+
+    imgDiv.appendChild(grid);
     body.appendChild(imgDiv);
   }
 
@@ -726,10 +809,69 @@ async function confirmDeleteTemplate() {
   }
 }
 
+// ─── Multi-imagen: hasta 5 archivos en el composer manual ───
+const MAX_IMAGES = 5;
+let _customImageFiles = [];
+
+function handleCustomImageChange() {
+  const input = document.getElementById('custom-image');
+  const incoming = Array.from(input.files || []);
+  // Acumular con los ya seleccionados, deduplicar por (name+size+lastModified)
+  const key = f => `${f.name}|${f.size}|${f.lastModified}`;
+  const known = new Set(_customImageFiles.map(key));
+  for (const f of incoming) {
+    if (!known.has(key(f))) {
+      _customImageFiles.push(f);
+      known.add(key(f));
+    }
+  }
+  if (_customImageFiles.length > MAX_IMAGES) {
+    _customImageFiles = _customImageFiles.slice(0, MAX_IMAGES);
+    showStatus('templates-status',
+      `Máximo ${MAX_IMAGES} imágenes — se ignoraron las extras`, 'error');
+  }
+  // Reset del input para que el mismo archivo pueda volver a elegirse tras quitarlo
+  input.value = '';
+  renderCustomImagePreviews();
+}
+
+function renderCustomImagePreviews() {
+  const container = document.getElementById('custom-image-previews');
+  if (!container) return;
+  container.innerHTML = '';
+  _customImageFiles.forEach((f, idx) => {
+    const item = document.createElement('div');
+    item.className = 'image-preview-item';
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(f);
+    img.alt = f.name;
+    item.appendChild(img);
+    const badge = document.createElement('span');
+    badge.className = 'image-preview-index';
+    badge.textContent = (idx + 1) + '/' + _customImageFiles.length;
+    item.appendChild(badge);
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'image-preview-remove';
+    rm.title = 'Quitar imagen';
+    rm.textContent = '×';
+    rm.onclick = () => {
+      _customImageFiles.splice(idx, 1);
+      renderCustomImagePreviews();
+    };
+    item.appendChild(rm);
+    container.appendChild(item);
+  });
+}
+
 function createFromManual() {
   const text = document.getElementById('custom-text').value.trim();
   if (!text) {
     showStatus('templates-status', 'El texto es obligatorio', 'error');
+    return;
+  }
+  if (_customImageFiles.length > MAX_IMAGES) {
+    showStatus('templates-status', `Máximo ${MAX_IMAGES} imágenes`, 'error');
     return;
   }
   state.selectedTemplate = {
@@ -737,18 +879,9 @@ function createFromManual() {
     name: 'Publicación personalizada',
     text: text,
     url: '',
-    image_path: null,
+    image_paths: [],
+    image_files: _customImageFiles.slice(),
   };
-  const file = document.getElementById('custom-image').files[0];
-  if (file) {
-    // Simular carga posterior
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      state.selectedTemplate.image_file = file;
-      state.selectedTemplate.image_data = e.target.result;
-    };
-    reader.readAsArrayBuffer(file);
-  }
   showStatus('templates-status', 'Publicación personalizada preparada', 'info');
   nextStep('accounts');
 }
@@ -954,8 +1087,16 @@ async function publish() {
   if (state.publishWhen === 'scheduled') {
     fd.append('scheduled_for', state.publishDatetime);
   }
-  if (state.selectedTemplate.image_file) {
-    fd.append('image', state.selectedTemplate.image_file);
+  // Imágenes adjuntas (manual): múltiples archivos bajo el mismo campo 'image'
+  if (Array.isArray(state.selectedTemplate.image_files)) {
+    state.selectedTemplate.image_files.forEach(f => fd.append('image', f));
+  }
+  // Si la plantilla guardada trae paths del servidor (sin archivos nuevos),
+  // pasarlos como JSON para que el backend los reutilice tal cual.
+  if ((!state.selectedTemplate.image_files || state.selectedTemplate.image_files.length === 0)
+      && Array.isArray(state.selectedTemplate.image_paths)
+      && state.selectedTemplate.image_paths.length > 0) {
+    fd.append('image_paths', JSON.stringify(state.selectedTemplate.image_paths));
   }
 
   // TODO: Enviar grupos específicos por cuenta (requiere nuevo endpoint)

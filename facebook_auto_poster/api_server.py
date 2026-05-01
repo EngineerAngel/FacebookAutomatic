@@ -24,6 +24,8 @@ Endpoints admin (requieren autenticación con ADMIN_KEY):
     GET    /admin/api/templates/<id>        → obtener plantilla
     PUT    /admin/api/templates/<id>        → actualizar plantilla
     DELETE /admin/api/templates/<id>        → eliminar plantilla
+    POST   /admin/api/upload-images         → subir 1–5 imágenes (devuelve paths)
+    GET    /admin/uploaded-images/<file>    → servir imagen guardada (preview admin)
     GET    /admin/api/history               → historial de logins
     GET    /admin/api/proxies               → listar nodos proxy + asignaciones
     POST   /admin/api/proxies               → registrar nodo proxy
@@ -165,6 +167,9 @@ UPLOAD_DIR = Path(__file__).resolve().parent / "uploaded_images"
 # Extensiones de imagen permitidas
 _ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
+# Máximo de imágenes por publicación (carrusel de Facebook acepta hasta 5)
+_MAX_IMAGES = 5
+
 # ---------------------------------------------------------------------------
 # Rate limiter — persistente en SQLite (sobrevive a reinicios)
 # ---------------------------------------------------------------------------
@@ -300,6 +305,32 @@ def _safe_image_path(path: str) -> str | None:
         return None
 
 
+def _safe_image_paths(value) -> tuple[list[str] | None, str | None]:
+    """Normaliza y valida una entrada de paths (modo JSON). Acepta:
+      - list[str] (preferido, multi-imagen)
+      - str       (legacy, single)
+    Retorna (lista_validada, None) en éxito, o (None, error_msg) si falla.
+    Lista vacía → ([], None). Cada path pasa por _safe_image_path().
+    """
+    if value is None or value == "":
+        return [], None
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, (list, tuple)):
+        candidates = [str(v) for v in value if v]
+    else:
+        return None, "Formato inválido para image_paths"
+    if len(candidates) > _MAX_IMAGES:
+        return None, f"Máximo {_MAX_IMAGES} imágenes por publicación"
+    out: list[str] = []
+    for raw in candidates:
+        safe = _safe_image_path(raw)
+        if safe is None:
+            return None, "image_path inválido o fuera del directorio permitido"
+        out.append(safe)
+    return out, None
+
+
 def _validate_image_upload(file) -> tuple[str | None, str | None]:
     """
     Valida y guarda un archivo subido por multipart.
@@ -336,21 +367,38 @@ def _extract_payload() -> tuple[dict | None, tuple[dict, int] | None]:
         scheduled_for = (request.form.get("scheduled_for") or "").strip() or None
         callback_url = (request.form.get("callback_url") or "").strip() or None
 
-        image_path: str | None = None
-        file = request.files.get("image")
-        if file and file.filename:
-            image_path, err = _validate_image_upload(file)
+        image_paths: list[str] = []
+        files = [f for f in request.files.getlist("image") if f and f.filename]
+        if len(files) > _MAX_IMAGES:
+            return None, ({"error": f"Máximo {_MAX_IMAGES} imágenes por publicación"}, 400)
+        for f in files:
+            saved, err = _validate_image_upload(f)
             if err:
                 return None, ({"error": err}, 400)
+            image_paths.append(saved)  # type: ignore[arg-type]
+        # Si no hay archivos nuevos pero el form trae paths ya existentes
+        # (ej. publicación desde plantilla guardada), aceptarlos como JSON.
+        if not image_paths:
+            raw_paths_field = request.form.get("image_paths")
+            if raw_paths_field:
+                try:
+                    parsed = json.loads(raw_paths_field)
+                except (ValueError, TypeError):
+                    return None, ({"error": "image_paths debe ser JSON válido"}, 400)
+                reused, err = _safe_image_paths(parsed)
+                if err:
+                    return None, ({"error": err}, 400)
+                image_paths = reused or []
     else:
         data = request.get_json(silent=True) or {}
         text = (data.get("text") or "").strip()
-        raw_image = data.get("image_path") or None
-        image_path = None
-        if raw_image:
-            image_path = _safe_image_path(str(raw_image))
-            if image_path is None:
-                return None, ({"error": "image_path inválido o fuera del directorio permitido"}, 400)
+        # image_paths (preferente) o image_path legacy
+        raw_paths = data.get("image_paths")
+        if raw_paths is None:
+            raw_paths = data.get("image_path")
+        image_paths, err = _safe_image_paths(raw_paths)
+        if err:
+            return None, ({"error": err}, 400)
         raw_accounts = data.get("accounts")
         accounts = raw_accounts if isinstance(raw_accounts, list) and raw_accounts else None
         scheduled_for = data.get("scheduled_for") or None
@@ -361,7 +409,7 @@ def _extract_payload() -> tuple[dict | None, tuple[dict, int] | None]:
 
     return {
         "text": text,
-        "image_path": image_path,
+        "image_paths": image_paths or [],
         "accounts": accounts,
         "scheduled_for": scheduled_for,
         "callback_url": callback_url,
@@ -422,7 +470,7 @@ def _filter_rate_limited_accounts(accounts):
 
 
 def _run_job(job_id: str, accounts, text: str,
-             image_path: str | None, callback_url: str | None,
+             image_paths: list[str] | None, callback_url: str | None,
              skip_hour_check: bool = False) -> None:
     # Adquirir locks por cuenta en orden lexicográfico para prevenir deadlocks
     # cuando dos jobs comparten cuentas en distintos órdenes.
@@ -452,7 +500,7 @@ def _run_job(job_id: str, accounts, text: str,
 
         mgr = AccountManager(
             runnable, CONFIG, text,
-            image_path=image_path, callback_url=callback_url,
+            image_paths=image_paths, callback_url=callback_url,
             skip_hour_check=skip_hour_check,
         )
         results = mgr.run()
@@ -476,10 +524,10 @@ def _run_job(job_id: str, accounts, text: str,
 
 
 def _enqueue_job(job_id: str, accounts, text: str,
-                 image_path: str | None, callback_url: str | None,
+                 image_paths: list[str] | None, callback_url: str | None,
                  skip_hour_check: bool = False) -> None:
     """Envía un job al pool. Max_workers limita la concurrencia global."""
-    _executor.submit(_run_job, job_id, accounts, text, image_path, callback_url, skip_hour_check)
+    _executor.submit(_run_job, job_id, accounts, text, image_paths, callback_url, skip_hour_check)
 
 
 def shutdown_executor(wait: bool = False) -> None:
@@ -622,16 +670,16 @@ def handle_post():
     job_id = job_store.create_job(
         text=payload["text"],
         accounts=payload["accounts"],
-        image_path=payload["image_path"],
+        image_paths=payload["image_paths"],
         callback_url=payload["callback_url"],
         job_type="immediate",
     )
 
-    logger.info("Job %s aceptado | cuentas=%s", job_id,
-                [a.name for a in accounts])
+    logger.info("Job %s aceptado | cuentas=%s | imágenes=%d", job_id,
+                [a.name for a in accounts], len(payload["image_paths"]))
 
     _enqueue_job(job_id, accounts, payload["text"],
-                 payload["image_path"], payload["callback_url"])
+                 payload["image_paths"], payload["callback_url"])
 
     return jsonify({
         "status": "accepted",
@@ -671,7 +719,7 @@ def create_schedule():
     job_id = job_store.create_job(
         text=payload["text"],
         accounts=payload["accounts"],
-        image_path=payload["image_path"],
+        image_paths=payload["image_paths"],
         callback_url=payload["callback_url"],
         job_type="scheduled",
         scheduled_for=when,
@@ -1329,15 +1377,15 @@ def admin_post():
     job_id = job_store.create_job(
         text=payload["text"],
         accounts=payload["accounts"],
-        image_path=payload["image_path"],
+        image_paths=payload["image_paths"],
         callback_url=None,
         job_type="immediate",
     )
 
-    logger.info("Job %s aceptado via admin | cuentas=%s", job_id,
-                [a.name for a in accounts])
+    logger.info("Job %s aceptado via admin | cuentas=%s | imágenes=%d", job_id,
+                [a.name for a in accounts], len(payload["image_paths"]))
 
-    _enqueue_job(job_id, accounts, payload["text"], payload["image_path"], None,
+    _enqueue_job(job_id, accounts, payload["text"], payload["image_paths"], None,
                  skip_hour_check=True)
 
     return jsonify({
@@ -1379,7 +1427,7 @@ def admin_create_schedule():
     job_id = job_store.create_job(
         text=payload["text"],
         accounts=payload["accounts"],
-        image_path=payload["image_path"],
+        image_paths=payload["image_paths"],
         callback_url=None,
         job_type="scheduled",
         scheduled_for=when,
@@ -1420,13 +1468,55 @@ def admin_cancel_schedule(job_id: str):
 MAX_TEMPLATE_TEXT_CHARS = 50000  # 50 KB de texto
 MAX_TEMPLATE_NAME_CHARS = 100
 MIN_TEMPLATE_TEXT_CHARS = 10
-MAX_TEMPLATE_URL_CHARS = 2048
 
 _TEMPLATE_ID_PATTERN = re.compile(r'^[a-f0-9]{12}$')
 
 def _validate_template_id(template_id: str) -> bool:
     """Valida que template_id sea UUID corto válido."""
     return bool(_TEMPLATE_ID_PATTERN.match(template_id))
+
+
+# ===========================================================================
+# ADMIN API — Upload de imágenes (independiente del flujo de publicación)
+# ===========================================================================
+
+@app.post("/admin/api/upload-images")
+@admin_required
+def admin_upload_images():
+    """Sube 1–5 imágenes y devuelve sus rutas seguras.
+
+    Multipart con uno o varios archivos bajo el campo 'image'. No crea jobs
+    ni dispara publicaciones — solo persiste los archivos en UPLOAD_DIR para
+    que el cliente luego incluya las rutas en una plantilla o publicación.
+    """
+    files = [f for f in request.files.getlist("image") if f and f.filename]
+    if not files:
+        return jsonify({"error": "No se enviaron archivos"}), 400
+    if len(files) > _MAX_IMAGES:
+        return jsonify({"error": f"Máximo {_MAX_IMAGES} imágenes por subida"}), 400
+
+    saved_paths: list[str] = []
+    for f in files:
+        path, err = _validate_image_upload(f)
+        if err:
+            return jsonify({"error": err}), 400
+        saved_paths.append(path)  # type: ignore[arg-type]
+
+    return jsonify({"image_paths": saved_paths}), 201
+
+
+@app.get("/admin/uploaded-images/<path:filename>")
+@admin_required
+def admin_serve_uploaded_image(filename: str):
+    """Sirve una imagen guardada en UPLOAD_DIR para previews del panel admin.
+
+    Sólo devuelve archivos cuya ruta resuelta caiga dentro de UPLOAD_DIR
+    (defensa contra path traversal).
+    """
+    safe = _safe_image_path(str(UPLOAD_DIR / filename))
+    if not safe:
+        return jsonify({"error": "Imagen no encontrada"}), 404
+    return send_from_directory(str(UPLOAD_DIR), Path(safe).name)
 
 
 @app.get("/admin/api/templates")
@@ -1444,8 +1534,6 @@ def admin_create_template():
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     text = (data.get("text") or "").strip()
-    url  = (data.get("url") or "").strip()
-    image_path = (data.get("image_path") or "").strip() or None
 
     # Validaciones
     if not name or len(name) < 2 or len(name) > MAX_TEMPLATE_NAME_CHARS:
@@ -1458,22 +1546,17 @@ def admin_create_template():
         return jsonify({
             "error": f"El texto no puede exceder {MAX_TEMPLATE_TEXT_CHARS} caracteres"
         }), 400
-    if not url:
-        return jsonify({"error": "La URL es obligatoria"}), 400
-    if len(url) > MAX_TEMPLATE_URL_CHARS:
-        return jsonify({
-            "error": f"La URL no puede exceder {MAX_TEMPLATE_URL_CHARS} caracteres"
-        }), 400
 
-    # Validar que image_path es seguro si se proporciona
-    if image_path:
-        safe_path = _safe_image_path(image_path)
-        if not safe_path:
-            return jsonify({"error": "image_path inválido o fuera del directorio permitido"}), 400
-        image_path = safe_path
+    # image_paths (preferente) o image_path legacy
+    raw_paths = data.get("image_paths")
+    if raw_paths is None:
+        raw_paths = data.get("image_path")
+    image_paths, err = _safe_image_paths(raw_paths)
+    if err:
+        return jsonify({"error": err}), 400
 
     try:
-        template_id = job_store.create_template(name, text, url, image_path)
+        template_id = job_store.create_template(name, text, "", image_paths)
         logger.info("Plantilla '%s' creada (id=%s) via admin", name, template_id)
         return jsonify({
             "status": "created",
@@ -1483,8 +1566,7 @@ def admin_create_template():
     except sqlite3.IntegrityError:
         return jsonify({"error": f"Ya existe una plantilla con el nombre '{name}'"}), 409
     except Exception as exc:
-        logger.exception("Error creando plantilla (nombre='%s', url='%s'): %s",
-                        name, url, exc)
+        logger.exception("Error creando plantilla (nombre='%s'): %s", name, exc)
         return jsonify({"error": "Error interno al crear plantilla"}), 500
 
 
@@ -1515,8 +1597,6 @@ def admin_update_template(template_id: str):
     data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip() or None
     text = (data.get("text") or "").strip() or None
-    url  = (data.get("url") or "").strip() or None
-    image_path = (data.get("image_path") or "").strip() or None
 
     # Validaciones si se proporcionan
     if name is not None and (len(name) < 2 or len(name) > MAX_TEMPLATE_NAME_CHARS):
@@ -1528,23 +1608,19 @@ def admin_update_template(template_id: str):
             return jsonify({
                 "error": f"El texto debe tener entre {MIN_TEMPLATE_TEXT_CHARS} y {MAX_TEMPLATE_TEXT_CHARS} caracteres"
             }), 400
-    if url is not None:
-        if not url:
-            return jsonify({"error": "La URL no puede estar vacía"}), 400
-        if len(url) > MAX_TEMPLATE_URL_CHARS:
-            return jsonify({
-                "error": f"La URL no puede exceder {MAX_TEMPLATE_URL_CHARS} caracteres"
-            }), 400
 
-    # Validar image_path si se proporciona
-    if image_path:
-        safe_path = _safe_image_path(image_path)
-        if not safe_path:
-            return jsonify({"error": "image_path inválido o fuera del directorio permitido"}), 400
-        image_path = safe_path
+    # image_paths (preferente) o image_path legacy. Solo se actualiza si está presente.
+    image_paths: list[str] | None = None
+    if "image_paths" in data or "image_path" in data:
+        raw_paths = data.get("image_paths")
+        if raw_paths is None:
+            raw_paths = data.get("image_path")
+        image_paths, err = _safe_image_paths(raw_paths)
+        if err:
+            return jsonify({"error": err}), 400
 
     try:
-        success = job_store.update_template(template_id, name, text, url, image_path)
+        success = job_store.update_template(template_id, name, text, None, image_paths)
         if success:
             logger.info("Plantilla '%s' actualizada via admin", template_id)
             return jsonify({"status": "updated", "id": template_id}), 200

@@ -24,6 +24,30 @@ DB_PATH = Path(__file__).resolve().parent / "jobs.db"
 _lock = threading.Lock()
 
 
+def _decode_image_paths(raw: str | None) -> list[str]:
+    """Decodifica el campo image_path (TEXT) tolerando ambos formatos:
+    JSON array (nuevo) o string crudo (legacy). None/'' → lista vacía."""
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return [raw]
+    if isinstance(value, list):
+        return [str(p) for p in value if p]
+    if isinstance(value, str):
+        return [value] if value else []
+    return []
+
+
+def _encode_image_paths(paths: list[str] | None) -> str | None:
+    """Serializa una lista de rutas a JSON para persistir en image_path (TEXT).
+    Lista vacía o None → None (NULL en DB)."""
+    if not paths:
+        return None
+    return json.dumps(list(paths))
+
+
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
@@ -522,12 +546,15 @@ def list_group_tags() -> list[dict]:
 def create_job(
     text: str,
     accounts: list[str] | None,
-    image_path: str | None,
+    image_paths: list[str] | None,
     callback_url: str | None,
     job_type: str = "immediate",
     scheduled_for: datetime | None = None,
 ) -> str:
-    """Inserta un nuevo job y retorna su id."""
+    """Inserta un nuevo job y retorna su id.
+
+    image_paths se serializa como JSON en la columna image_path (TEXT).
+    """
     job_id = uuid.uuid4().hex[:12]
     with _lock, _connect() as conn:
         conn.execute(
@@ -539,7 +566,7 @@ def create_job(
                 job_id,
                 text,
                 json.dumps(accounts) if accounts else None,
-                image_path,
+                _encode_image_paths(image_paths),
                 callback_url,
                 job_type,
                 scheduled_for.isoformat() if scheduled_for else None,
@@ -797,7 +824,7 @@ def pop_due_scheduled(now: datetime) -> list[dict]:
                 "id": row["id"],
                 "text": row["text"],
                 "accounts": accounts,
-                "image_path": row["image_path"],
+                "image_paths": _decode_image_paths(row["image_path"]),
                 "callback_url": row["callback_url"],
                 "scheduled_for": row["scheduled_for"],
             })
@@ -928,7 +955,7 @@ def list_pending_scheduled() -> list[dict]:
                 "id": r["id"],
                 "text": r["text"],
                 "accounts": json.loads(r["accounts"]) if r["accounts"] else None,
-                "image_path": r["image_path"],
+                "image_paths": _decode_image_paths(r["image_path"]),
                 "callback_url": r["callback_url"],
                 "scheduled_for": r["scheduled_for"],
                 "created_at": r["created_at"],
@@ -1262,7 +1289,7 @@ def create_template(
     name: str,
     text: str,
     url: str,
-    image_path: str | None = None,
+    image_paths: list[str] | None = None,
 ) -> str:
     """
     Crea una nueva plantilla de publicación.
@@ -1274,9 +1301,20 @@ def create_template(
         conn.execute(
             """INSERT INTO templates (id, name, text, url, image_path, created_at)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            (template_id, name, text, url, image_path, now),
+            (template_id, name, text, url, _encode_image_paths(image_paths), now),
         )
     return template_id
+
+
+def _row_to_template(row) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "text": row["text"],
+        "url": row["url"],
+        "image_paths": _decode_image_paths(row["image_path"]),
+        "created_at": row["created_at"],
+    }
 
 
 def get_template(template_id: str) -> dict | None:
@@ -1287,7 +1325,7 @@ def get_template(template_id: str) -> dict | None:
                FROM templates WHERE id=?""",
             (template_id,),
         ).fetchone()
-        return dict(row) if row else None
+        return _row_to_template(row) if row else None
 
 
 def list_templates() -> list[dict]:
@@ -1298,7 +1336,7 @@ def list_templates() -> list[dict]:
                FROM templates
                ORDER BY created_at DESC""",
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [_row_to_template(r) for r in rows]
 
 
 def update_template(
@@ -1306,7 +1344,7 @@ def update_template(
     name: str | None = None,
     text: str | None = None,
     url: str | None = None,
-    image_path: str | None = None,
+    image_paths: list[str] | None = None,
 ) -> bool:
     """
     Actualiza una plantilla con los campos proporcionados (solo non-None).
@@ -1324,9 +1362,9 @@ def update_template(
     if url is not None:
         parts.append("url = ?")
         params.append(url)
-    if image_path is not None:
+    if image_paths is not None:
         parts.append("image_path = ?")
-        params.append(image_path)
+        params.append(_encode_image_paths(image_paths))
 
     if not parts:
         return False

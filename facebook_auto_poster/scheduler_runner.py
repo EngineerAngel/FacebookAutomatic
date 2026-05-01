@@ -39,7 +39,7 @@ def _run_scheduled_job(job: dict) -> None:
     """Ejecuta un job agendado: mismo pipeline que POST /post."""
     job_id = job["id"]
     text = job["text"]
-    image_path = job.get("image_path")
+    image_paths = job.get("image_paths") or []
     callback_url = job.get("callback_url")
     account_filter = job.get("accounts")
 
@@ -67,7 +67,7 @@ def _run_scheduled_job(job: dict) -> None:
     try:
         mgr = AccountManager(
             accounts, CONFIG, text,
-            image_path=image_path, callback_url=callback_url,
+            image_paths=image_paths, callback_url=callback_url,
         )
         results = mgr.run()
         mgr.print_summary(results)

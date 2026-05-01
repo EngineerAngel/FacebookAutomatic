@@ -111,6 +111,40 @@ tr:hover td { background: #151823; }
 .field input:focus, .field textarea:focus { border-color: #7c8cf8; }
 .field .hint { font-size: 0.75rem; color: #475569; margin-top: 0.25rem; }
 
+/* ─── Plantillas: previews de imágenes ─────────────────────────────── */
+.tf-image-previews {
+  display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.6rem;
+}
+.tf-img-item {
+  position: relative; width: 88px; height: 88px;
+  border: 1px solid #2d3148; border-radius: 5px; overflow: hidden;
+  background: #0f1117;
+}
+.tf-img-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tf-img-rm {
+  position: absolute; top: 3px; right: 3px;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: rgba(0,0,0,0.75); color: #fca5a5; border: none;
+  font-size: 0.8rem; font-weight: bold; cursor: pointer; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.tf-img-rm:hover { background: #7f1d1d; color: #fff; }
+.tf-img-idx {
+  position: absolute; bottom: 3px; left: 3px;
+  background: rgba(0,0,0,0.75); color: #e2e8f0;
+  font-size: 0.65rem; padding: 1px 5px; border-radius: 3px;
+}
+/* Miniatura en la tabla */
+.tpl-thumb {
+  width: 44px; height: 44px; border-radius: 4px; object-fit: cover;
+  border: 1px solid #2d3148; background: #0f1117; vertical-align: middle;
+}
+.tpl-thumb-more {
+  display: inline-block; min-width: 28px; padding: 0 6px; height: 44px; line-height: 44px;
+  text-align: center; border: 1px dashed #2d3148; border-radius: 4px;
+  color: #94a3b8; font-size: 0.75rem; margin-left: 4px; vertical-align: middle;
+}
+
 /* ─── Inline tag edit ───────────────────────────────────────────── */
 .tag-cell { display: flex; align-items: center; gap: 0.5rem; }
 .tag-input {
@@ -347,14 +381,13 @@ tr:hover td { background: #151823; }
           <tr>
             <th>Nombre</th>
             <th>Texto (vista previa)</th>
-            <th>URL</th>
-            <th>Imagen</th>
+            <th>Imágenes</th>
             <th>Creada</th>
             <th>Acciones</th>
           </tr>
         </thead>
         <tbody id="templates-body">
-          <tr><td colspan="6" class="empty">Cargando...</td></tr>
+          <tr><td colspan="5" class="empty">Cargando...</td></tr>
         </tbody>
       </table>
     </div>
@@ -415,18 +448,15 @@ tr:hover td { background: #151823; }
       <input type="text" id="tf-name" placeholder="Oferta de temporada" maxlength="100">
     </div>
     <div class="field">
-      <label>Texto del post</label>
+      <label>Texto del post <small>(incluye URLs y números de contacto aquí)</small></label>
       <textarea id="tf-text" rows="6" placeholder="Escribe aquí el texto que se publicará en los grupos..."></textarea>
       <p class="hint"><span id="tf-char-count">0</span> caracteres (mín. 10)</p>
     </div>
     <div class="field">
-      <label>URL <small>(obligatoria)</small></label>
-      <input type="text" id="tf-url" placeholder="https://ejemplo.com/producto" maxlength="2048">
-    </div>
-    <div class="field">
-      <label>Ruta de imagen <small>(opcional — ruta en el servidor)</small></label>
-      <input type="text" id="tf-image" placeholder="/ruta/en/servidor/imagen.jpg" maxlength="512">
-      <p class="hint">Deja vacío si el post no lleva imagen.</p>
+      <label>Imágenes <small>(opcional, hasta 5)</small></label>
+      <input type="file" id="tf-images" accept=".jpg,.jpeg,.png,.gif,.webp" multiple onchange="handleTemplateImagesChange()">
+      <p class="hint">Formatos: jpg, jpeg, png, gif, webp · Carrusel multi-foto en Facebook</p>
+      <div id="tf-image-previews" class="tf-image-previews"></div>
     </div>
     <div class="modal-actions">
       <button class="btn btn-cancel" onclick="closeTemplateModal()">Cancelar</button>
@@ -1161,13 +1191,27 @@ async function addDiscoveredGroupInline(accountName, groupId, btn) {
 
 // ─── Plantillas ───────────────────────────────────────────────────────────
 let editingTemplateId = null;
+const TPL_MAX_IMAGES = 5;
+
+// Estado del modal:
+//  - tplExistingPaths: paths ya guardados en el servidor (al editar una plantilla)
+//  - tplNewFiles:      File objects recién elegidos (aún no subidos)
+let tplExistingPaths = [];
+let tplNewFiles = [];
+
+function tplImageUrl(serverPath) {
+  // Convierte un path absoluto del servidor en URL pública del admin.
+  // Ej: /home/.../uploaded_images/abc.png  →  /admin/uploaded-images/abc.png
+  const fname = serverPath.split('/').pop();
+  return '/admin/uploaded-images/' + encodeURIComponent(fname);
+}
 
 async function loadTemplates() {
   const { ok, data } = await api('GET', '/admin/api/templates');
   const tbody = document.getElementById('templates-body');
   tbody.innerHTML = '';
   if (!ok || !data.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">No hay plantillas. Crea la primera con "+ Nueva plantilla".</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No hay plantillas. Crea la primera con "+ Nueva plantilla".</td></tr>';
     return;
   }
   data.forEach(t => {
@@ -1184,26 +1228,23 @@ async function loadTemplates() {
     tdText.style.fontSize = '0.82rem';
     tdText.title = t.text;
 
-    const tdUrl = document.createElement('td');
-    const link = document.createElement('a');
-    link.href = t.url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    link.textContent = t.url.length > 40 ? t.url.slice(0, 40) + '…' : t.url;
-    link.style.color = '#7c8cf8';
-    link.style.fontSize = '0.82rem';
-    tdUrl.appendChild(link);
-
     const tdImg = document.createElement('td');
-    if (t.image_path) {
-      const badge = document.createElement('span');
-      badge.className = 'badge ok';
-      badge.textContent = '✓ Imagen';
-      badge.title = t.image_path;
-      tdImg.appendChild(badge);
-    } else {
+    const paths = Array.isArray(t.image_paths) ? t.image_paths : [];
+    if (paths.length === 0) {
       tdImg.textContent = '—';
       tdImg.style.color = '#475569';
+    } else {
+      const thumb = document.createElement('img');
+      thumb.className = 'tpl-thumb';
+      thumb.src = tplImageUrl(paths[0]);
+      thumb.alt = paths.length + ' imagen(es)';
+      tdImg.appendChild(thumb);
+      if (paths.length > 1) {
+        const more = document.createElement('span');
+        more.className = 'tpl-thumb-more';
+        more.textContent = '+' + (paths.length - 1);
+        tdImg.appendChild(more);
+      }
     }
 
     const tdDate = document.createElement('td');
@@ -1226,7 +1267,6 @@ async function loadTemplates() {
 
     tr.appendChild(tdName);
     tr.appendChild(tdText);
-    tr.appendChild(tdUrl);
     tr.appendChild(tdImg);
     tr.appendChild(tdDate);
     tr.appendChild(tdAcc);
@@ -1239,8 +1279,10 @@ function openTemplateModal(t = null) {
   document.getElementById('template-modal-title').textContent = t ? 'Editar plantilla' : 'Nueva plantilla';
   document.getElementById('tf-name').value  = t ? t.name : '';
   document.getElementById('tf-text').value  = t ? t.text : '';
-  document.getElementById('tf-url').value   = t ? t.url  : '';
-  document.getElementById('tf-image').value = t && t.image_path ? t.image_path : '';
+  document.getElementById('tf-images').value = '';
+  tplExistingPaths = (t && Array.isArray(t.image_paths)) ? t.image_paths.slice() : [];
+  tplNewFiles = [];
+  renderTemplateImagePreviews();
   updateTemplateCharCount();
   document.getElementById('template-modal-bg').classList.add('open');
 }
@@ -1248,6 +1290,82 @@ function openTemplateModal(t = null) {
 function closeTemplateModal() {
   document.getElementById('template-modal-bg').classList.remove('open');
   editingTemplateId = null;
+  tplExistingPaths = [];
+  tplNewFiles = [];
+  const previews = document.getElementById('tf-image-previews');
+  if (previews) previews.innerHTML = '';
+}
+
+function handleTemplateImagesChange() {
+  const input = document.getElementById('tf-images');
+  const incoming = Array.from(input.files || []);
+  const key = f => `${f.name}|${f.size}|${f.lastModified}`;
+  const known = new Set(tplNewFiles.map(key));
+  for (const f of incoming) {
+    if (!known.has(key(f))) {
+      tplNewFiles.push(f);
+      known.add(key(f));
+    }
+  }
+  const total = tplExistingPaths.length + tplNewFiles.length;
+  if (total > TPL_MAX_IMAGES) {
+    const overflow = total - TPL_MAX_IMAGES;
+    tplNewFiles = tplNewFiles.slice(0, tplNewFiles.length - overflow);
+    toast(`Máximo ${TPL_MAX_IMAGES} imágenes — se ignoraron las extras`, true);
+  }
+  input.value = '';
+  renderTemplateImagePreviews();
+}
+
+function renderTemplateImagePreviews() {
+  const container = document.getElementById('tf-image-previews');
+  if (!container) return;
+  container.innerHTML = '';
+  let idx = 0;
+  const total = tplExistingPaths.length + tplNewFiles.length;
+
+  tplExistingPaths.forEach((p, i) => {
+    idx++;
+    const item = document.createElement('div');
+    item.className = 'tf-img-item';
+    const img = document.createElement('img');
+    img.src = tplImageUrl(p);
+    item.appendChild(img);
+    const badge = document.createElement('span');
+    badge.className = 'tf-img-idx';
+    badge.textContent = idx + '/' + total;
+    item.appendChild(badge);
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'tf-img-rm';
+    rm.title = 'Quitar imagen';
+    rm.textContent = '×';
+    rm.onclick = () => { tplExistingPaths.splice(i, 1); renderTemplateImagePreviews(); };
+    item.appendChild(rm);
+    container.appendChild(item);
+  });
+
+  tplNewFiles.forEach((f, i) => {
+    idx++;
+    const item = document.createElement('div');
+    item.className = 'tf-img-item';
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(f);
+    img.alt = f.name;
+    item.appendChild(img);
+    const badge = document.createElement('span');
+    badge.className = 'tf-img-idx';
+    badge.textContent = idx + '/' + total;
+    item.appendChild(badge);
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'tf-img-rm';
+    rm.title = 'Quitar imagen';
+    rm.textContent = '×';
+    rm.onclick = () => { tplNewFiles.splice(i, 1); renderTemplateImagePreviews(); };
+    item.appendChild(rm);
+    container.appendChild(item);
+  });
 }
 
 function updateTemplateCharCount() {
@@ -1256,21 +1374,44 @@ function updateTemplateCharCount() {
 }
 document.getElementById('tf-text').addEventListener('input', updateTemplateCharCount);
 
+async function uploadTemplateFiles() {
+  // Sube los archivos nuevos via /admin/api/upload-images y devuelve sus paths.
+  if (tplNewFiles.length === 0) return [];
+  const fd = new FormData();
+  tplNewFiles.forEach(f => fd.append('image', f));
+  const res = await fetch('/admin/api/upload-images', { method: 'POST', body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  return Array.isArray(data.image_paths) ? data.image_paths : [];
+}
+
 async function saveTemplate() {
   const name  = document.getElementById('tf-name').value.trim();
   const text  = document.getElementById('tf-text').value.trim();
-  const url   = document.getElementById('tf-url').value.trim();
-  const image = document.getElementById('tf-image').value.trim() || null;
 
   if (!name || name.length < 2)  { toast('El nombre debe tener al menos 2 caracteres', true); return; }
   if (!text || text.length < 10) { toast('El texto debe tener al menos 10 caracteres', true); return; }
-  if (!url)                       { toast('La URL es obligatoria', true); return; }
+  if (tplExistingPaths.length + tplNewFiles.length > TPL_MAX_IMAGES) {
+    toast(`Máximo ${TPL_MAX_IMAGES} imágenes`, true);
+    return;
+  }
+
+  let uploadedPaths = [];
+  try {
+    uploadedPaths = await uploadTemplateFiles();
+  } catch (err) {
+    toast('Error subiendo imágenes: ' + err.message, true);
+    return;
+  }
+  const finalPaths = tplExistingPaths.concat(uploadedPaths);
 
   const isEdit = editingTemplateId !== null;
   const method = isEdit ? 'PUT' : 'POST';
   const path   = isEdit ? `/admin/api/templates/${editingTemplateId}` : '/admin/api/templates';
 
-  const { ok, data } = await api(method, path, { name, text, url, image_path: image });
+  const { ok, data } = await api(method, path, { name, text, image_paths: finalPaths });
   if (!ok) { toast(data.error || 'Error al guardar', true); return; }
 
   toast(isEdit ? 'Plantilla actualizada' : 'Plantilla creada');

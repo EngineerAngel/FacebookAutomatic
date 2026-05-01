@@ -27,7 +27,7 @@ def _worker(
     config: dict,
     text: str,
     shared_results: dict,
-    image_path: str | None = None,
+    image_paths: list[str] | None = None,
     callback_url: str | None = None,
 ) -> None:
     """Run a full session for one account inside a child process."""
@@ -38,7 +38,7 @@ def _worker(
             shared_results[account.name] = {}
             return
 
-        results = poster.publish_to_all_groups(text, image_path=image_path)
+        results = poster.publish_to_all_groups(text, image_paths=image_paths)
         shared_results[account.name] = dict(results)
     except Exception:
         logger.error(
@@ -60,14 +60,14 @@ class AccountManager:
         accounts: list[AccountConfig],
         config: dict,
         text: str,
-        image_path: str | None = None,
+        image_paths: list[str] | None = None,
         callback_url: str | None = None,
         skip_hour_check: bool = False,
     ) -> None:
         self.accounts = accounts
         self.config = config
         self.text = text
-        self.image_path = image_path
+        self.image_paths = image_paths or []
         self.callback_url = callback_url
         self.skip_hour_check = skip_hour_check
 
@@ -87,7 +87,7 @@ class AccountManager:
                     summary[account.name] = {}
                     continue
 
-                results = poster.publish_to_all_groups(self.text, image_path=self.image_path)
+                results = poster.publish_to_all_groups(self.text, image_paths=self.image_paths)
                 summary[account.name] = results
 
             except Exception:
@@ -121,7 +121,7 @@ class AccountManager:
             p = multiprocessing.Process(
                 target=_worker,
                 args=(account, self.config, self.text, shared_results,
-                      self.image_path, self.callback_url),
+                      self.image_paths, self.callback_url),
                 name=f"poster-{account.name}",
             )
             processes.append(p)

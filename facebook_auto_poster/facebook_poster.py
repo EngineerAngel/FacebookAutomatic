@@ -496,9 +496,17 @@ class FacebookPoster:
         except Exception:
             self.logger.warning("Failed to save screenshot %s", path, exc_info=True)
 
-    def _attach_image(self, image_path: str) -> bool:
-        """Adjunta imagen al compositor. Devuelve True si el thumbnail se confirma."""
-        abs_path = os.path.abspath(image_path)
+    def _attach_image(self, image_paths: list[str]) -> bool:
+        """Adjunta 1–N imágenes al compositor en una sola operación.
+
+        Patchright/Playwright aceptan lista de paths en set_files/set_input_files,
+        lo que dispara el flujo de carrusel multi-foto de Facebook automáticamente.
+        Devuelve True si al menos un thumbnail se confirma.
+        """
+        if not image_paths:
+            return False
+        abs_paths = [os.path.abspath(p) for p in image_paths]
+        self.logger.info("[Image] Subiendo %d archivo(s)", len(abs_paths))
 
         # Localizar el botón Foto/Video dentro del modal
         photo_btn_loc = self.page.locator(
@@ -516,8 +524,8 @@ class FacebookPoster:
             photo_btn_loc.wait_for(state="visible", timeout=5000)
             with self.page.expect_file_chooser(timeout=5000) as fc_info:
                 self._human_click(photo_btn_loc)
-            fc_info.value.set_files(abs_path)
-            self.logger.info("[Image] Archivo enviado via FileChooser (sin diálogo OS)")
+            fc_info.value.set_files(abs_paths)
+            self.logger.info("[Image] %d archivo(s) enviados via FileChooser", len(abs_paths))
             file_sent = True
         except Exception:
             self.logger.debug("[Image] FileChooser no interceptado — usando set_input_files")
@@ -528,18 +536,21 @@ class FacebookPoster:
                 file_input = self.page.locator(
                     "//div[@role='dialog']//input[@type='file']"
                 ).first
-                file_input.set_input_files(abs_path, timeout=15000)
-                self.logger.info("[Image] Archivo enviado via set_input_files (dialog)")
+                file_input.set_input_files(abs_paths, timeout=15000)
+                self.logger.info("[Image] %d archivo(s) enviados via set_input_files (dialog)",
+                                 len(abs_paths))
                 file_sent = True
             except Exception:
                 pass
 
         # 3) Fallback global
         if not file_sent:
-            self.page.set_input_files("//input[@type='file']", abs_path, timeout=15000)
-            self.logger.info("[Image] Archivo enviado via set_input_files (global)")
+            self.page.set_input_files("//input[@type='file']", abs_paths, timeout=15000)
+            self.logger.info("[Image] %d archivo(s) enviados via set_input_files (global)",
+                             len(abs_paths))
 
-        self.logger.info("[Image] Ruta: %s", abs_path)
+        for p in abs_paths:
+            self.logger.info("[Image] Ruta: %s", p)
 
         # 3) Esperar señal de upload en progreso (opcional, no bloquea)
         try:
@@ -1215,7 +1226,7 @@ class FacebookPoster:
     # ------------------------------------------------------------------ #
     # Publish
     # ------------------------------------------------------------------ #
-    def publish(self, group_id: str, text: str, image_path: str | None = None) -> bool:
+    def publish(self, group_id: str, text: str, image_paths: list[str] | None = None) -> bool:
         """Post *text* (y opcionalmente imagen) to a single group. Returns True on success."""
 
         for attempt in range(1, self.config["max_retries"] + 1):
@@ -1265,7 +1276,7 @@ class FacebookPoster:
                 # --- Abrir compositor del grupo (NO campo de comentarios) ---
                 self.logger.info("[Publish] Buscando compositor del grupo...")
                 composer = self._find_first([
-                    # Placeholder visible en el compositor (confirmado en screenshot)
+                    # Placeholder visible en el compositor estandar
                     "//span[text()='Escribe algo...']",
                     "//span[text()='Write something...']",
                     "//span[contains(text(),'Escribe algo')]",
@@ -1275,13 +1286,71 @@ class FacebookPoster:
                     "//div[@aria-label='Write something...']",
                     # Compositor via data-pagelet (algunos grupos)
                     "//div[@data-pagelet='GroupInlineComposer']//div[@role='button']",
-                    # Botón Crear publicación
+                    # Boton Crear publicacion (grupos normales)
                     "//div[@aria-label='Crear publicación']",
                     "//div[@aria-label='Create post']",
                     "//span[contains(text(),'Crear publicaci')]",
+                    "//span[contains(text(),'Create post')]",
+                    # Grupos de compra/venta (formulario de ventas)
+                    "//span[contains(text(),'Vender algo')]",
+                    "//span[contains(text(),'Sell something')]",
+                    "//div[@aria-label='Vender algo']",
+                    "//div[@aria-label='Sell something']",
+                    "//span[contains(text(),'Crear publicación de venta')]",
+                    "//span[contains(text(),'Create sale post')]",
                 ], timeout=15)
                 self._human_click(composer)
                 self.human_wait(2, 4)
+
+                # --- Detectar si es formulario de venta (compra/venta) -------
+                is_sales_form = False
+                try:
+                    sales_indicators = [
+                        "//span[contains(text(),'Elige el tipo')]",
+                        "//span[contains(text(),'Choose a type')]",
+                        "//span[contains(text(),'Selecciona una categor')]",
+                        "//span[contains(text(),'Select a categor')]",
+                        "//label[contains(text(),'Precio') or contains(text(),'Price')]",
+                        "//label[contains(text(),'Condición') or contains(text(),'Condition')]",
+                        "//div[contains(text(),'Artículo en venta') or contains(text(),'Item for sale')]",
+                    ]
+                    for sel in sales_indicators:
+                        if self.page.locator(sel).first.is_visible():
+                            is_sales_form = True
+                            break
+                except Exception:
+                    pass
+
+                if is_sales_form:
+                    # Intentar cambiar a pestaña "Publicacion" normal si existe
+                    switched = False
+                    normal_tabs = [
+                        "//span[text()='Publicación' or text()='Publicacion']",
+                        "//span[text()='Post']",
+                        "//span[text()='Crear publicación']",
+                        "//span[contains(text(),'Publicaci')]",
+                    ]
+                    for tab in normal_tabs:
+                        try:
+                            tab_el = self.page.locator(tab).first
+                            if tab_el.is_visible():
+                                self._human_click(tab_el)
+                                self.human_wait(1, 2)
+                                switched = True
+                                self.logger.info(
+                                    "[Publish] Cambiado a pestaña 'Publicación' en grupo %s", group_id)
+                                break
+                        except Exception:
+                            pass
+
+                    if not switched:
+                        self.logger.warning(
+                            "[Publish] Grupo %s es de compra/venta (formulario) — "
+                            "no soportado, saltando", group_id)
+                        self._screenshot(f"sales_form_{group_id}.png")
+                        continue
+                    # Cambio exitoso → continuar con flujo normal
+                    is_sales_form = False
 
                 # --- Esperar el modal de publicación (NO comentario) --------
                 self.logger.info("[Publish] Esperando modal de publicacion...")
@@ -1306,9 +1375,9 @@ class FacebookPoster:
                 else:
                     self.human_wait(1, 2)
 
-                # --- Adjuntar imagen si se proporcionó --------------------
-                if image_path:
-                    img_ok = self._attach_image(image_path)
+                # --- Adjuntar imagen(es) si se proporcionaron -------------
+                if image_paths:
+                    img_ok = self._attach_image(image_paths)
                     if not img_ok:
                         # Verificar si la página tuvo error durante el upload
                         health = self._check_page_health("after_image")
@@ -1393,7 +1462,7 @@ class FacebookPoster:
     # ------------------------------------------------------------------ #
     # Publish to all groups
     # ------------------------------------------------------------------ #
-    def publish_to_all_groups(self, text: str, image_path: str | None = None) -> dict[str, bool]:
+    def publish_to_all_groups(self, text: str, image_paths: list[str] | None = None) -> dict[str, bool]:
         """Post to every group assigned to this account.
 
         Returns a dict mapping group_id -> success boolean.
@@ -1435,7 +1504,7 @@ class FacebookPoster:
                 variation_mode, self.account.name, group_id, len(text), len(group_text),
             )
 
-            success = self.publish(group_id, group_text, image_path=image_path)
+            success = self.publish(group_id, group_text, image_paths=image_paths)
             results[group_id] = success
 
             # Wait between groups, but not after the last one
