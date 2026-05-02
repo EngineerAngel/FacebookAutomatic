@@ -367,6 +367,17 @@ def _extract_payload() -> tuple[dict | None, tuple[dict, int] | None]:
         scheduled_for = (request.form.get("scheduled_for") or "").strip() or None
         callback_url = (request.form.get("callback_url") or "").strip() or None
 
+        # group_ids: selección de grupos por cuenta (JSON string)
+        group_ids: dict[str, list[str]] | None = None
+        raw_group_ids = request.form.get("group_ids", "").strip()
+        if raw_group_ids:
+            try:
+                group_ids = json.loads(raw_group_ids)
+                if not isinstance(group_ids, dict):
+                    return None, ({"error": "group_ids debe ser un objeto JSON"}, 400)
+            except (ValueError, TypeError):
+                return None, ({"error": "group_ids debe ser JSON válido"}, 400)
+
         image_paths: list[str] = []
         files = [f for f in request.files.getlist("image") if f and f.filename]
         if len(files) > _MAX_IMAGES:
@@ -404,6 +415,11 @@ def _extract_payload() -> tuple[dict | None, tuple[dict, int] | None]:
         scheduled_for = data.get("scheduled_for") or None
         callback_url = data.get("callback_url") or None
 
+        # group_ids: selección de grupos por cuenta
+        group_ids = data.get("group_ids")
+        if group_ids is not None and not isinstance(group_ids, dict):
+            return None, ({"error": "group_ids debe ser un objeto JSON"}, 400)
+
     if not text:
         return None, ({"error": "Campo 'text' es obligatorio"}, 400)
 
@@ -413,6 +429,7 @@ def _extract_payload() -> tuple[dict | None, tuple[dict, int] | None]:
         "accounts": accounts,
         "scheduled_for": scheduled_for,
         "callback_url": callback_url,
+        "group_ids": group_ids,
     }, None
 
 
@@ -471,7 +488,18 @@ def _filter_rate_limited_accounts(accounts):
 
 def _run_job(job_id: str, accounts, text: str,
              image_paths: list[str] | None, callback_url: str | None,
-             skip_hour_check: bool = False) -> None:
+             skip_hour_check: bool = False,
+             group_ids: dict[str, list[str]] | None = None) -> None:
+    # Aplicar filtro de grupos seleccionados por cuenta
+    if group_ids is not None:
+        from config import apply_group_filter
+        accounts = apply_group_filter(accounts, group_ids)
+        if not accounts:
+            msg = "Ninguna cuenta con grupos válidos tras aplicar group_ids"
+            logger.warning("Job %s: %s", job_id, msg)
+            job_store.mark_failed(job_id, msg)
+            webhook.fire(callback_url, job_id, "failed", error_msg=msg)
+            return
     # Adquirir locks por cuenta en orden lexicográfico para prevenir deadlocks
     # cuando dos jobs comparten cuentas en distintos órdenes.
     accounts_sorted = sorted(accounts, key=lambda a: a.name)
@@ -525,9 +553,10 @@ def _run_job(job_id: str, accounts, text: str,
 
 def _enqueue_job(job_id: str, accounts, text: str,
                  image_paths: list[str] | None, callback_url: str | None,
-                 skip_hour_check: bool = False) -> None:
+                 skip_hour_check: bool = False,
+                 group_ids: dict[str, list[str]] | None = None) -> None:
     """Envía un job al pool. Max_workers limita la concurrencia global."""
-    _executor.submit(_run_job, job_id, accounts, text, image_paths, callback_url, skip_hour_check)
+    _executor.submit(_run_job, job_id, accounts, text, image_paths, callback_url, skip_hour_check, group_ids)
 
 
 def shutdown_executor(wait: bool = False) -> None:
@@ -673,13 +702,16 @@ def handle_post():
         image_paths=payload["image_paths"],
         callback_url=payload["callback_url"],
         job_type="immediate",
+        group_ids=payload["group_ids"],
     )
 
-    logger.info("Job %s aceptado | cuentas=%s | imágenes=%d", job_id,
-                [a.name for a in accounts], len(payload["image_paths"]))
+    logger.info("Job %s aceptado | cuentas=%s | imágenes=%d | group_filter=%s", job_id,
+                [a.name for a in accounts], len(payload["image_paths"]),
+                "sí" if payload["group_ids"] is not None else "no")
 
     _enqueue_job(job_id, accounts, payload["text"],
-                 payload["image_paths"], payload["callback_url"])
+                 payload["image_paths"], payload["callback_url"],
+                 group_ids=payload["group_ids"])
 
     return jsonify({
         "status": "accepted",
@@ -723,6 +755,7 @@ def create_schedule():
         callback_url=payload["callback_url"],
         job_type="scheduled",
         scheduled_for=when,
+        group_ids=payload["group_ids"],
     )
 
     logger.info("Job %s agendado para %s", job_id, when.isoformat())
@@ -1380,13 +1413,15 @@ def admin_post():
         image_paths=payload["image_paths"],
         callback_url=None,
         job_type="immediate",
+        group_ids=payload["group_ids"],
     )
 
-    logger.info("Job %s aceptado via admin | cuentas=%s | imágenes=%d", job_id,
-                [a.name for a in accounts], len(payload["image_paths"]))
+    logger.info("Job %s aceptado via admin | cuentas=%s | imágenes=%d | group_filter=%s", job_id,
+                [a.name for a in accounts], len(payload["image_paths"]),
+                "sí" if payload["group_ids"] is not None else "no")
 
     _enqueue_job(job_id, accounts, payload["text"], payload["image_paths"], None,
-                 skip_hour_check=True)
+                 skip_hour_check=True, group_ids=payload["group_ids"])
 
     return jsonify({
         "status": "accepted",
@@ -1431,6 +1466,7 @@ def admin_create_schedule():
         callback_url=None,
         job_type="scheduled",
         scheduled_for=when,
+        group_ids=payload["group_ids"],
     )
 
     logger.info("Job %s agendado para %s via admin", job_id, when.isoformat())

@@ -218,6 +218,7 @@ def init_db() -> None:
             "ALTER TABLE accounts ADD COLUMN fingerprint_json TEXT",
             "ALTER TABLE accounts ADD COLUMN password_enc TEXT",
             "ALTER TABLE account_proxy_assignment ADD COLUMN last_used_at TEXT",
+            "ALTER TABLE jobs ADD COLUMN group_ids TEXT",
         ]:
             try:
                 conn.execute(stmt)
@@ -550,18 +551,21 @@ def create_job(
     callback_url: str | None,
     job_type: str = "immediate",
     scheduled_for: datetime | None = None,
+    group_ids: dict[str, list[str]] | None = None,
 ) -> str:
     """Inserta un nuevo job y retorna su id.
 
     image_paths se serializa como JSON en la columna image_path (TEXT).
+    group_ids se serializa como JSON en la columna group_ids (TEXT).
+    NULL en ambas columnas significa "sin restricción".
     """
     job_id = uuid.uuid4().hex[:12]
     with _lock, _connect() as conn:
         conn.execute(
             """INSERT INTO jobs
                (id, text, accounts, image_path, callback_url,
-                type, scheduled_for, status, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+                type, scheduled_for, status, created_at, group_ids)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
                 job_id,
                 text,
@@ -572,6 +576,7 @@ def create_job(
                 scheduled_for.isoformat() if scheduled_for else None,
                 "pending",
                 datetime.now().isoformat(),
+                json.dumps(group_ids) if group_ids else None,
             ),
         )
     return job_id
@@ -806,7 +811,7 @@ def pop_due_scheduled(now: datetime) -> list[dict]:
     """
     with _lock, _connect() as conn:
         rows = conn.execute(
-            """SELECT id, text, accounts, image_path, callback_url, scheduled_for
+            """SELECT id, text, accounts, image_path, callback_url, scheduled_for, group_ids
                FROM jobs
                WHERE type='scheduled' AND status='pending'
                  AND scheduled_for <= ?""",
@@ -820,6 +825,7 @@ def pop_due_scheduled(now: datetime) -> list[dict]:
                 (now.isoformat(), row["id"]),
             )
             accounts = json.loads(row["accounts"]) if row["accounts"] else None
+            raw_gids = row["group_ids"] if row["group_ids"] else None
             due.append({
                 "id": row["id"],
                 "text": row["text"],
@@ -827,6 +833,7 @@ def pop_due_scheduled(now: datetime) -> list[dict]:
                 "image_paths": _decode_image_paths(row["image_path"]),
                 "callback_url": row["callback_url"],
                 "scheduled_for": row["scheduled_for"],
+                "group_ids": json.loads(raw_gids) if raw_gids else None,
             })
         return due
 
@@ -839,7 +846,7 @@ def get_recent_jobs(limit: int = 50) -> list[dict]:
     with _lock, _connect() as conn:
         rows = conn.execute(
             """SELECT id, type, status, accounts, scheduled_for,
-                      created_at, started_at, finished_at
+                      created_at, started_at, finished_at, group_ids
                FROM jobs
                ORDER BY created_at DESC LIMIT ?""",
             (limit,),
@@ -871,6 +878,7 @@ def get_recent_jobs(limit: int = 50) -> list[dict]:
                 "groups_ok":     succeeded,
                 "groups_fail":   failed,
                 "errors":        errors,
+                "group_ids":     json.loads(r["group_ids"]) if r["group_ids"] else None,
             })
         return jobs
 
@@ -881,7 +889,7 @@ def get_job(job_id: str) -> dict | None:
     with _lock, _connect() as conn:
         r = conn.execute(
             """SELECT id, type, status, accounts, scheduled_for,
-                      created_at, started_at, finished_at
+                      created_at, started_at, finished_at, group_ids
                FROM jobs WHERE id=?""",
             (job_id,),
         ).fetchone()
@@ -910,6 +918,7 @@ def get_job(job_id: str) -> dict | None:
             "type":          r["type"],
             "status":        r["status"],
             "accounts":      json.loads(r["accounts"]) if r["accounts"] else None,
+            "group_ids":     json.loads(r["group_ids"]) if r["group_ids"] else None,
             "scheduled_for": r["scheduled_for"],
             "created_at":    r["created_at"],
             "started_at":    r["started_at"],
@@ -957,7 +966,8 @@ def list_pending_scheduled() -> list[dict]:
     """Lista jobs agendados aún pendientes (para GET /schedule)."""
     with _lock, _connect() as conn:
         rows = conn.execute(
-            """SELECT id, text, accounts, image_path, callback_url, scheduled_for, created_at
+            """SELECT id, text, accounts, image_path, callback_url,
+                      scheduled_for, created_at, group_ids
                FROM jobs WHERE type='scheduled' AND status='pending'
                ORDER BY scheduled_for ASC""",
         ).fetchall()
@@ -970,6 +980,7 @@ def list_pending_scheduled() -> list[dict]:
                 "callback_url": r["callback_url"],
                 "scheduled_for": r["scheduled_for"],
                 "created_at": r["created_at"],
+                "group_ids": json.loads(r["group_ids"]) if r["group_ids"] else None,
             }
             for r in rows
         ]

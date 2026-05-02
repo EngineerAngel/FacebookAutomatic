@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime
 
-from config import CONFIG, load_accounts
+from config import CONFIG, load_accounts, apply_group_filter
 import job_store
 import webhook
 from account_manager import AccountManager
@@ -42,6 +42,7 @@ def _run_scheduled_job(job: dict) -> None:
     image_paths = job.get("image_paths") or []
     callback_url = job.get("callback_url")
     account_filter = job.get("accounts")
+    group_ids = job.get("group_ids")  # dict[str, list[str]] | None
 
     try:
         accounts = load_accounts()
@@ -53,6 +54,10 @@ def _run_scheduled_job(job: dict) -> None:
 
     if account_filter:
         accounts = [a for a in accounts if a.name in account_filter]
+
+    # Aplicar filtro de grupos seleccionados por cuenta
+    if group_ids is not None:
+        accounts = apply_group_filter(accounts, group_ids)
 
     if not accounts:
         msg = "Sin cuentas válidas para este job"
