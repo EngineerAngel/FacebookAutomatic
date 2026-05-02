@@ -17,17 +17,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |------|---------------|
 | `config.py` | ENV loading, `AccountConfig` dataclass, fingerprint + timezone helpers |
 | `job_store.py` | SQLite schema, all DB operations (WAL mode, no threading.Lock) |
-| `facebook_poster.py` | Patchright login + publish (one instance per account) |
-| `account_manager.py` | Orchestrates sequential / parallel sessions |
+| `facebook_poster_async.py` | Async Patchright login + publish (one instance per account) |
+| `account_manager_async.py` | Async orchestration: `asyncio.Semaphore` for parallel account handling |
 | `api_server.py` | Flask REST API + admin panel |
 | `scheduler_runner.py` | Daemon that polls for scheduled jobs every 30s |
 | `main.py` | Entry point (API + scheduler) |
 | `logging_config.py` | Central logging setup — text mode or structured JSON (structlog) |
 | `gemini_commenter.py` | Gemini API integration (human-like comments during warmup) |
-| `human_browsing.py` | Feed warmup before posting (`HumanBrowsing` sync + `HumanBrowsingAsync`) |
+| `human_browsing.py` | Async feed warmup before posting (`HumanBrowsingAsync`) |
 | `webhook.py` | Async callbacks to OpenClaw |
-| `facebook_poster_async.py` | Async counterpart of `facebook_poster.py` — flag `use_async_poster` |
-| `account_manager_async.py` | Async counterpart of `account_manager.py` — `asyncio.Semaphore` |
+| `v2_app.py` | FastAPI wrapper (optional, when `USE_FASTAPI=1`) |
+| `v2_router.py` | FastAPI endpoints `/v2/*` (same contract as Flask endpoints) |
+| `v2_models.py` | Pydantic models for request/response validation |
+| `v2_deps.py` | FastAPI dependencies (API key + rate limit) |
 
 ## Running
 
@@ -45,8 +47,8 @@ python facebook_auto_poster/main.py
 ```
 OpenClaw → POST /post (X-API-Key)
          → api_server._run_job() [daemon thread]
-         → AccountManager.run()   [sequential or multiprocessing]
-         → FacebookPoster × N accounts
+         → AsyncAccountManager.run() [async, Semaphore-based concurrency]
+         → FacebookPosterAsync × N accounts [asyncio.gather]
              ├─ login()                  [cookie restore → email/pass fallback]
              └─ publish_to_all_groups()
          → job_store.mark_done()
@@ -54,6 +56,8 @@ OpenClaw → POST /post (X-API-Key)
 
 Scheduled jobs: POST /schedule → DB → scheduler_runner (every 30s) → same pipeline
 ```
+
+**Async design (Fase 3.1):** All posting is now async-first. No sync version remains. `AsyncAccountManager` controls concurrency via `asyncio.Semaphore(max_concurrent)` (default 3, configurable via `EXECUTION_MODE` env var).
 
 ### Anti-Detection Stack
 
@@ -81,7 +85,7 @@ from logging_config import setup_logging, bind_account, unbind_account, get_form
 
 setup_logging(structured=True, log_dir=Path("logs"))   # call once at startup (main.py)
 bind_account("elena")     # inject account field into every log from this thread
-unbind_account()          # clear thread-local context (called in FacebookPoster.close())
+unbind_account()          # clear thread-local context (called in FacebookPosterAsync.close())
 get_formatter()           # returns the active formatter — used by per-account file handlers
 ```
 
@@ -180,14 +184,16 @@ Hour guard: accounts have `active_hours=(7,23)` + `timezone="UTC"` in DB. `Accou
 
 Shared password: `FB_PASSWORD` in `.env` used for all accounts (see known issues).
 
-## FacebookPoster Lifecycle
+## FacebookPosterAsync Lifecycle (Async-only)
 
 ```python
-poster = FacebookPoster(account, config)   # opens Chromium, loads fingerprint
-if poster.login():                         # cookie restore → email/pass fallback
-    results = poster.publish_to_all_groups(text, image_path=image_path)
-poster.close()
+poster = FacebookPosterAsync(account, config)    # opens Chromium, loads fingerprint
+if await poster.login():                         # cookie restore → email/pass fallback
+    results = await poster.publish_to_all_groups(text, image_path=image_path)
+await poster.close()
 ```
+
+**Note:** All poster operations are now async. Called via `asyncio.gather()` in `AsyncAccountManager.run()`.
 
 ## Development
 
@@ -212,10 +218,10 @@ sqlite3 facebook_auto_poster/jobs.db "SELECT id, status FROM jobs ORDER BY creat
 | 🔴 Critical | All accounts share same IP — cluster-ban risk | 1.1 (proxy pool, needs hardware) |
 | 🔴 Critical | Session cookies stored unencrypted in SQLite | 2.8 (Fernet encryption) |
 | 🟡 Medium | Single `FB_PASSWORD` for all accounts | 1.2 (individual encrypted passwords) |
-| 🟡 Medium | Flask dev server in production (no WSGI) | 2.4 (`waitress`) |
+| 🟡 Medium | Flask dev server in production (no WSGI) | 2.4 (`waitress`) — replaced by `uvicorn` + FastAPI in Fase 3.2 |
 | 🟡 Medium | Dependencies unpinned (`>=` only, no lock file) | 2.5 (`pip freeze`) |
 | 🟢 Low | Rate limiter in-memory (resets on restart) | 2.6 (SQLite-backed) |
-| 🟢 Low | `sync_playwright` + threading (not officially thread-safe) | 3.1 (async migration, in progress) |
+| 🟢 Low | Async poster + threading (not officially thread-safe) | ✅ 3.1 complete (async-only, no sync version) |
 
 ## Improvement Plan
 
@@ -225,11 +231,15 @@ Three phases tracked in `plan/` directory:
 |-------|--------|-------|
 | **Fase 1** (stop-the-bleeding) | 3/6 complete | Identity isolation per account |
 | **Fase 2** (hardening) | complete | Production stability |
-| **Fase 3** (refactor) | 3/7 in progress | Async + FastAPI + observability |
+| **Fase 3** (refactor) | 5/7 complete | Async + FastAPI + observability |
 
 **Fase 1 completed:** 1.3 (fingerprints), 1.4 (timezone/active hours), 1.5 (typo rate)
-**Fase 3 completed:** Paso 0 (pytest + 67 tests), 3.5 (SQLite WAL / remove lock), 3.3a (structlog JSON logging), 3.1 (Playwright async)
-**Fase 3 next:** 3.2 (FastAPI en /v2)
+**Fase 3 completed:** 
+- Paso 0 (pytest + 67 tests) ✅
+- 3.1 (async-only architecture, eliminated sync version) ✅
+- 3.2 (FastAPI /v2 endpoints + Pydantic validation) ✅
+- 3.3a (structlog JSON logging) ✅
+- 3.5 (SQLite WAL / no global lock) ✅
 
 See `plan/AVANCE_FASE_*.md` for detailed task tracking.
 
