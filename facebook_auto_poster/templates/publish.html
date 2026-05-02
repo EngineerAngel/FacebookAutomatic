@@ -605,6 +605,27 @@ function switchWorkflow(section) {
 }
 
 function nextStep(section) {
+  if (section === 'schedule') {
+    const selGroups = state.selectedGroups || {};
+    const hasAny = state.selectedAccounts.some(acc => {
+      const arr = selGroups[acc];
+      return Array.isArray(arr) && arr.length > 0;
+    });
+    if (hasAny) {
+      const sinGrupos = state.selectedAccounts.filter(acc => {
+        const arr = selGroups[acc];
+        return !Array.isArray(arr) || arr.length === 0;
+      });
+      if (sinGrupos.length > 0) {
+        const names = sinGrupos.map(a => `"${a}"`).join(', ');
+        showStatus('groups-status',
+          `La cuenta ${names} no tiene grupos seleccionados. Marca al menos 1 grupo o deselecciónala antes de continuar.`,
+          'error');
+        return;
+      }
+    }
+  }
+  if (section === 'confirm') updateSummary();
   switchWorkflow(section);
   window.scrollTo(0, 0);
 }
@@ -767,7 +788,7 @@ function showTemplatePreview(tplId) {
       wrap.style.background = '#0f1117';
 
       const img = document.createElement('img');
-      img.src = src;
+      img.src = '/admin/uploaded-images/' + encodeURIComponent(src.split('/').pop());
       img.style.width = '100%';
       img.style.height = '100%';
       img.style.objectFit = 'cover';
@@ -1050,11 +1071,22 @@ function updateSummary() {
 
   html += `<div class="summary-item"><span class="summary-label">Cuentas:</span><span class="summary-value">${state.selectedAccounts.length}</span></div>`;
 
-  let totalGroups = 0;
-  state.selectedAccounts.forEach(acc => {
-    totalGroups += (state.selectedGroups[acc] || []).length;
+  const selGroups = state.selectedGroups || {};
+  const hasAnyGroupSelected = state.selectedAccounts.some(acc => {
+    const arr = selGroups[acc];
+    return Array.isArray(arr) && arr.length > 0;
   });
-  html += `<div class="summary-item"><span class="summary-label">Total de grupos:</span><span class="summary-value">${totalGroups}</span></div>`;
+  if (hasAnyGroupSelected) {
+    state.selectedAccounts.forEach(acc => {
+      const groups = selGroups[acc] || [];
+      const label = groups.length > 0
+        ? `${groups.length} grupo${groups.length !== 1 ? 's' : ''}`
+        : '<span style="color:#f87171">0 grupos (se omitirá)</span>';
+      html += `<div class="summary-item"><span class="summary-label">&nbsp;&nbsp;${escapeHtml(acc)}:</span><span class="summary-value">${label}</span></div>`;
+    });
+  } else {
+    html += `<div class="summary-item"><span class="summary-label">Grupos:</span><span class="summary-value">Todos (sin filtro)</span></div>`;
+  }
 
   html += `<div class="summary-item"><span class="summary-label">Cuándo:</span><span class="summary-value">${state.publishWhen === 'now' ? 'Ahora' : state.publishDatetime || 'No especificado'}</span></div>`;
 
@@ -1113,7 +1145,23 @@ async function publish() {
     fd.append('image_paths', JSON.stringify(state.selectedTemplate.image_paths));
   }
 
-  // TODO: Enviar grupos específicos por cuenta (requiere nuevo endpoint)
+  // Enviar selección de grupos específicos por cuenta.
+  // Se construye un mapa completo con TODAS las cuentas seleccionadas:
+  // las que tienen grupos marcados → filtradas; las sin grupos → [] → backend las omite.
+  // Si ninguna cuenta tiene grupos marcados, no se envía group_ids y el backend
+  // publica en todos los grupos de cada cuenta (comportamiento por defecto).
+  const selGroups = state.selectedGroups || {};
+  const hasSelection = state.selectedAccounts.some(acc => {
+    const arr = selGroups[acc];
+    return Array.isArray(arr) && arr.length > 0;
+  });
+  if (hasSelection) {
+    const completeGroupMap = {};
+    state.selectedAccounts.forEach(acc => {
+      completeGroupMap[acc] = Array.isArray(selGroups[acc]) ? selGroups[acc] : [];
+    });
+    fd.append('group_ids', JSON.stringify(completeGroupMap));
+  }
 
   try {
     const endpoint = state.publishWhen === 'scheduled' ? '/admin/api/schedule' : '/admin/api/post';
@@ -1307,14 +1355,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 
-// Actualizar resumen cuando se cambian selecciones
-document.addEventListener('DOMContentLoaded', () => {
-  const origNextStep = window.nextStep;
-  window.nextStep = function(section) {
-    if (section === 'confirm') updateSummary();
-    origNextStep(section);
-  };
-});
 </script>
 
 <script>
