@@ -1,7 +1,7 @@
 # Avance — Fase 3: Refactor arquitectónico
 
 > **Última actualización:** 2026-05-01
-> **Estado:** 🔄 En progreso — Paso 0 + 3.5 + 3.3a + 3.1 + 3.2 + 3.3b + 3.4 completados. Siguiente: 3.6 (spike mouse library, opcional) o cierre de Fase 3.
+> **Estado:** ✅ Completada — Todos los ítems implementados. 3.6 (spike mouse library) descartado — Emunium funciona en producción sin problemas.
 > **Prerrequisito cumplido:** Fase 1 (6/6) + Fase 2 (9/9) completas e integradas en `master`.
 
 ---
@@ -27,8 +27,8 @@ Fase 3 moderniza la base técnica para soportar crecimiento (más cuentas, más 
 | 4 | 3.2 | FastAPI montado en `/v2` + Pydantic validation | ✅ Completado | 2026-05-01 |
 | 5 | 3.3b | Prometheus + Grafana + tab de métricas en admin | ✅ Completado | 2026-05-01 |
 | 6 | 3.4 | DOM snapshots + auto-reparación selectores (con Scrapling) | ✅ Completado | 2026-05-01 |
-| 7 | 3.6 | Spike mouse library | ⏳ Pendiente (puede saltarse) | — |
-| 8 | 3.7 | Separar API/workers | ⏳ Pendiente (opcional) | — |
+| 7 | 3.6 | Spike mouse library | ⛔ Descartado — Emunium estable | — |
+| 8 | 3.7 | Separar API/workers | ✅ Completado | 2026-05-01 |
 
 ---
 
