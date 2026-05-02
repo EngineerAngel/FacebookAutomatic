@@ -1,7 +1,7 @@
 # Avance — Fase 3: Refactor arquitectónico
 
 > **Última actualización:** 2026-05-01
-> **Estado:** 🔄 En progreso — Paso 0 + 3.5 + 3.3a + 3.1 + 3.2 completados. Siguiente: 3.4 (auto-reparación DOM) o 3.3b (Prometheus).
+> **Estado:** 🔄 En progreso — Paso 0 + 3.5 + 3.3a + 3.1 + 3.2 + 3.3b completados. Siguiente: 3.4 (auto-reparación DOM con Scrapling).
 > **Prerrequisito cumplido:** Fase 1 (6/6) + Fase 2 (9/9) completas e integradas en `master`.
 
 ---
@@ -25,7 +25,7 @@ Fase 3 moderniza la base técnica para soportar crecimiento (más cuentas, más 
 | 2 | 3.3a | Logs estructurados (structlog) | ✅ Completado | 2026-05-01 |
 | 3 | 3.1 | Playwright async + consolidación async-only | ✅ Completado | 2026-05-01 |
 | 4 | 3.2 | FastAPI montado en `/v2` + Pydantic validation | ✅ Completado | 2026-05-01 |
-| 5 | 3.3b | Prometheus + dashboards | ⏳ Pendiente | — |
+| 5 | 3.3b | Prometheus + Grafana + tab de métricas en admin | ✅ Completado | 2026-05-01 |
 | 6 | 3.4 | DOM snapshots + auto-reparación selectores (con Scrapling) | ⏳ Pendiente | — |
 | 7 | 3.6 | Spike mouse library | ⏳ Pendiente (puede saltarse) | — |
 | 8 | 3.7 | Separar API/workers | ⏳ Pendiente (opcional) | — |
@@ -118,18 +118,22 @@ Una única ruta de ejecución → menos bugs, menos mantenimiento, base más lim
 
 ---
 
-### Ítem 3.3b — Prometheus + dashboards
+### Ítem 3.3b — Prometheus + Grafana + Tab de métricas ✅
 
-**Tras 3.1 completado** (y opcionalmente 3.2).
+**Completado 2026-05-01.**
 
-**Qué resuelve:** ver en tiempo real tasa de éxito por cuenta, latencia, alertas de ban, sin revisar logs.
+**Qué resuelve:** visibilidad en tiempo real de la ejecución — tasa de éxito, latencia, cuentas baneadas, cola de jobs.
 
-- Métricas: `fb_publish_total{account,result}`, `fb_publish_duration_seconds`, `fb_active_workers`, `fb_login_failures_total`.
-- Endpoint `/metrics`.
-- Alertas: tasa éxito < 80% en 1h, ban detectado, cola > 50 jobs.
-- Flag: `expose_metrics`.
+**Implementación:**
+- `metrics.py`: Counters (jobs, publishes, logins, API requests), Histograms (duración), Gauges (con Collector que consulta DB)
+- Endpoint `GET /metrics` (formato Prometheus) — cero overhead si `METRICS_ENABLED=0`
+- `docker-compose.monitoring.yml`: Prometheus + Grafana con dashboard pre-configurado
+- Tab "Métricas" en admin panel: gauges en vivo + polling cada 3s desde `/admin/api/queue`
+- Integración en `facebook_poster_async.py`, `api_server.py`: calls a `metrics.inc_login()`, `metrics.inc_publish()`, `metrics.observe_publish_duration()`
 
-**Decisión abierta:** backend de logs centralizados (Loki / Datadog / solo archivos JSON). Decidir al iniciar.
+**Activación:** `METRICS_ENABLED=1` en `.env`
+
+**Documentación:** ver `METRICS_SETUP.md` para setup completo y troubleshooting.
 
 ---
 
