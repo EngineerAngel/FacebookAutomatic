@@ -208,6 +208,7 @@ tr:hover td { background: #151823; }
     <button class="tab-btn" data-tab="groups">Grupos &amp; Tags</button>
     <button class="tab-btn" data-tab="jobs">Jobs</button>
     <button class="tab-btn" data-tab="history">Logins</button>
+    <button class="tab-btn" data-tab="metrics">Métricas</button>
   </div>
 
   <!-- ══════ TAB: Cuentas ══════ -->
@@ -330,6 +331,55 @@ tr:hover td { background: #151823; }
         </tbody>
       </table>
     </div>
+  </div>
+
+  <!-- ══════ TAB: Métricas ══════ -->
+  <div id="tab-metrics" class="tab-panel">
+    <div class="section-hdr">
+      <h2>Métricas en tiempo real</h2>
+      <button class="btn btn-primary btn-sm" onclick="pollMetrics(); toast('Actualizando...', false)">↻ Actualizar ahora</button>
+    </div>
+
+    <!-- Gauges grid -->
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1.5rem 0;">
+      <div style="background: #1a1d27; border: 1px solid #2d3148; padding: 1.5rem; border-radius: 6px; text-align: center;">
+        <div style="color: #96b4f5; font-size: 32px; font-weight: bold;" id="metric-pending">0</div>
+        <div style="color: #8892b0; font-size: 12px; margin-top: 0.5rem;">Pendientes</div>
+      </div>
+      <div style="background: #1a1d27; border: 1px solid #2d3148; padding: 1.5rem; border-radius: 6px; text-align: center;">
+        <div style="color: #fbbf24; font-size: 32px; font-weight: bold;" id="metric-running">0</div>
+        <div style="color: #8892b0; font-size: 12px; margin-top: 0.5rem;">En ejecución</div>
+      </div>
+      <div style="background: #1a1d27; border: 1px solid #2d3148; padding: 1.5rem; border-radius: 6px; text-align: center;">
+        <div style="color: #86efac; font-size: 32px; font-weight: bold;" id="metric-done">0</div>
+        <div style="color: #8892b0; font-size: 12px; margin-top: 0.5rem;">Completados</div>
+      </div>
+      <div style="background: #1a1d27; border: 1px solid #2d3148; padding: 1.5rem; border-radius: 6px; text-align: center;">
+        <div style="color: #ff6b6b; font-size: 32px; font-weight: bold;" id="metric-failed">0</div>
+        <div style="color: #8892b0; font-size: 12px; margin-top: 0.5rem;">Fallidos</div>
+      </div>
+      <div style="background: #1a1d27; border: 1px solid #2d3148; padding: 1.5rem; border-radius: 6px; text-align: center;">
+        <div style="color: #7c8cf8; font-size: 32px; font-weight: bold;" id="metric-active-accounts">0</div>
+        <div style="color: #8892b0; font-size: 12px; margin-top: 0.5rem;">Cuentas activas</div>
+      </div>
+      <div style="background: #1a1d27; border: 1px solid #2d3148; padding: 1.5rem; border-radius: 6px; text-align: center;">
+        <div style="color: #67e8f9; font-size: 32px; font-weight: bold;" id="metric-in-progress">0</div>
+        <div style="color: #8892b0; font-size: 12px; margin-top: 0.5rem;">Corriendo ahora</div>
+      </div>
+    </div>
+
+    <!-- Cuentas en progreso -->
+    <div style="background: #1a1d27; border: 1px solid #2d3148; padding: 1.5rem; border-radius: 6px; margin-top: 1.5rem;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <h3 style="margin: 0; font-size: 16px; color: #e2e8f0;">Cuentas en progreso</h3>
+        <span style="font-size: 12px; color: #8892b0;" id="metric-last-update">—</span>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; gap: 0.75rem;" id="metric-accounts-list">
+        <span style="color: #8892b0; font-size: 13px;">Ninguna</span>
+      </div>
+    </div>
+
+    <p style="color: #8892b0; font-size: 12px; margin-top: 1.5rem; text-align: center;">Se actualiza automáticamente cada 3 segundos</p>
   </div>
 
 </div><!-- /container -->
@@ -1051,6 +1101,75 @@ document.addEventListener('keydown', e => {
 });
 document.getElementById('modal-bg').addEventListener('click', e => {
   if (e.target === document.getElementById('modal-bg')) closeModal();
+});
+
+// ─── Métricas (Fase 3.3b) ─────────────────────────────────────────────────
+let _metricsInterval = null;
+
+function parseAccountsInProgress(accountsList) {
+  if (!accountsList || accountsList.length === 0) {
+    document.getElementById("metric-accounts-list").innerHTML =
+      '<span style="color: #8892b0; font-size: 13px;">Ninguna</span>';
+    return;
+  }
+  const html = accountsList
+    .map(acc => `<span style="background: #2d3148; padding: 0.5rem 1rem; border-radius: 4px; color: #96b4f5; font-size: 13px;">${acc}</span>`)
+    .join("");
+  document.getElementById("metric-accounts-list").innerHTML = html;
+}
+
+async function loadMetrics() {
+  const { ok, data } = await api('GET', '/admin/api/queue');
+  if (!ok) {
+    console.error('Failed to load metrics:', data);
+    return;
+  }
+  const statusCounts = data.jobs_by_status || {};
+  document.getElementById("metric-pending").textContent = statusCounts.pending || 0;
+  document.getElementById("metric-running").textContent = statusCounts.running || 0;
+  document.getElementById("metric-done").textContent = statusCounts.done || 0;
+  document.getElementById("metric-failed").textContent = statusCounts.failed || 0;
+  document.getElementById("metric-in-progress").textContent = data.accounts_in_progress?.length || 0;
+  const { ok: ok2, data: accountsData } = await api('GET', '/admin/api/accounts');
+  if (ok2) {
+    const active = (accountsData || []).filter(a => a.is_active).length;
+    document.getElementById("metric-active-accounts").textContent = active;
+  }
+  parseAccountsInProgress(data.accounts_in_progress);
+  const now = new Date();
+  document.getElementById("metric-last-update").textContent = now.toLocaleTimeString('es-ES');
+}
+
+function pollMetrics() {
+  loadMetrics();
+  if (_metricsInterval) clearInterval(_metricsInterval);
+  _metricsInterval = setInterval(() => loadMetrics(), 3000);
+}
+
+// Enganchar tab switching para métricas
+const _originalTabHandler = window._handleTabClick || null;
+window._handleTabClick = function(tabName) {
+  if (_originalTabHandler) _originalTabHandler(tabName);
+  if (tabName === 'metrics') {
+    pollMetrics();
+  } else if (_metricsInterval) {
+    clearInterval(_metricsInterval);
+    _metricsInterval = null;
+  }
+};
+
+// Buscar dónde se hace tab switching y enganchar ahí
+const tabButtons = document.querySelectorAll('.tab-btn');
+tabButtons.forEach(btn => {
+  btn.addEventListener('click', function() {
+    const tabName = this.getAttribute('data-tab');
+    if (tabName === 'metrics') {
+      pollMetrics();
+    } else if (_metricsInterval) {
+      clearInterval(_metricsInterval);
+      _metricsInterval = null;
+    }
+  });
 });
 
 // ─── Init ─────────────────────────────────────────────────────────────────

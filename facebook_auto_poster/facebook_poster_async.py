@@ -41,6 +41,7 @@ from config import AccountConfig
 import job_store
 import proxy_manager
 import webhook
+import metrics
 from gemini_commenter import GeminiCommenter
 from human_browsing import HumanBrowsingAsync
 from logging_config import bind_account, get_formatter, unbind_account
@@ -757,6 +758,7 @@ class FacebookPosterAsync:
                     if await self._is_logged_in():
                         self.logger.info("[Login] ✓ Sesión restaurada desde cookies para %s", self.account.name)
                         job_store.record_login(self.account.name, True)
+                        metrics.inc_login(self.account.name, True)
                         return True
                     self.logger.info("[Login] Cookies cargadas pero sesión inactiva — login normal")
                 else:
@@ -801,11 +803,13 @@ class FacebookPosterAsync:
                     self._banned = True
                     await self._handle_banned("login")
                     job_store.record_login(self.account.name, False)
+                    metrics.inc_login(self.account.name, False)
                     return False
                 if challenge != "clear":
                     self.logger.warning("[Login] Desafío detectado: %s", challenge)
                     if not await self._wait_for_manual_resolution():
                         job_store.record_login(self.account.name, False)
+                        metrics.inc_login(self.account.name, False)
                         return False
                     resolved = True
                     break
@@ -819,6 +823,7 @@ class FacebookPosterAsync:
                 )
                 await self._screenshot("login_blocked.png")
                 job_store.record_login(self.account.name, False)
+                metrics.inc_login(self.account.name, False)
                 return False
 
             self.logger.info("[Login] Redirección exitosa. URL actual: %s", self.page.url)
@@ -845,12 +850,14 @@ class FacebookPosterAsync:
 
             self.logger.info("Login exitoso para %s", self.account.name)
             job_store.record_login(self.account.name, True)
+            metrics.inc_login(self.account.name, True)
             return True
 
         except Exception:
             self.logger.error("Login FAILED for %s", self.account.name, exc_info=True)
             await self._screenshot("login_error.png")
             job_store.record_login(self.account.name, False)
+            metrics.inc_login(self.account.name, False)
             return False
 
     # ------------------------------------------------------------------ #
@@ -891,6 +898,7 @@ class FacebookPosterAsync:
     # ------------------------------------------------------------------ #
     async def publish(self, group_id: str, text: str, image_path: str | None = None) -> bool:
         """Post *text* (y opcionalmente imagen) to a single group. Returns True on success."""
+        _t0 = time.monotonic()
 
         for attempt in range(1, self.config["max_retries"] + 1):
             if self._banned:
@@ -1010,6 +1018,8 @@ class FacebookPosterAsync:
 
                 self.logger.info("Published to group %s successfully", group_id)
                 self._publish_count += 1
+                metrics.inc_publish(self.account.name, True)
+                metrics.observe_publish_duration(self.account.name, time.monotonic() - _t0)
                 await self._maybe_refresh_session()
                 return True
 
@@ -1022,6 +1032,8 @@ class FacebookPosterAsync:
                 await self._check_page_health(f"exception_attempt_{attempt}")
 
         self.logger.error("All %d attempts exhausted for group %s", self.config["max_retries"], group_id)
+        metrics.inc_publish(self.account.name, False)
+        metrics.observe_publish_duration(self.account.name, time.monotonic() - _t0)
         return False
 
     # ------------------------------------------------------------------ #

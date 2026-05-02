@@ -9,7 +9,10 @@
       "Bash(python -c \"from facebook_poster import FacebookPoster; print\\('[OK]'\\)\")",
       "Bash(git commit -m ' *)",
       "Bash(python -)",
-      "Bash(python -m pytest facebook_auto_poster/tests/unit/ -v --tb=short)"
+      "Bash(python -m pytest facebook_auto_poster/tests/unit/ -v --tb=short)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(curl -s https://raw.githubusercontent.com/D4Vinci/Scrapling/main/pyproject.toml)"
     ]
   }
 }

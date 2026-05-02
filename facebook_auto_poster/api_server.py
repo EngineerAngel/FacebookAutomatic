@@ -49,6 +49,7 @@ from account_manager_async import AsyncAccountManager
 import job_store
 import proxy_manager
 import webhook
+import metrics
 from group_discoverer import discover_groups_for_account
 try:
     from crypto import encrypt_password as _encrypt_password
@@ -183,9 +184,14 @@ def openclaw_required(f):
         endpoint = request.endpoint or request.path
         if job_store.is_rate_limited(ip, endpoint, _RATE_LIMIT, _RATE_WINDOW):
             logger.warning("Rate limit alcanzado para %s en %s", ip, endpoint)
+            metrics.inc_api_request(endpoint, 429)
             return jsonify({"error": "Demasiadas peticiones, espera un momento"}), 429
 
-        return f(*args, **kwargs)
+        result = f(*args, **kwargs)
+        # Registrar request exitoso (200 o 202)
+        status = result[1] if isinstance(result, tuple) else 200
+        metrics.inc_api_request(endpoint, status)
+        return result
     return decorated
 
 
@@ -407,6 +413,7 @@ def _run_job(job_id: str, accounts, text: str,
             msg = f"Todas las cuentas excedieron su rate limit ({len(skipped)} saltadas)"
             logger.warning("Job %s: %s", job_id, msg)
             job_store.mark_failed(job_id, msg)
+            metrics.inc_job("failed")
             webhook.fire(callback_url, job_id, "failed", error_msg=msg)
             return
 
@@ -418,10 +425,12 @@ def _run_job(job_id: str, accounts, text: str,
         results = asyncio.run(mgr.run())
         AsyncAccountManager.print_summary(results)
         job_store.mark_done(job_id, results)
+        metrics.inc_job("done")
         webhook.fire(callback_url, job_id, "done", results)
     except Exception:
         logger.exception("Fallo en worker | job=%s", job_id)
         job_store.mark_failed(job_id, "Unhandled exception in worker")
+        metrics.inc_job("failed")
         webhook.fire(callback_url, job_id, "failed",
                      error_msg="Unhandled exception in worker")
     finally:
@@ -510,6 +519,15 @@ def health_detailed():
         "jobs_by_status": job_store.count_jobs_by_status(),
         "recent_bans": job_store.list_recent_bans(limit=10),
     })
+
+
+@app.get("/metrics")
+def prometheus_metrics():
+    """Endpoint Prometheus para Fase 3.3b — requiere METRICS_ENABLED=1."""
+    if not CONFIG.get("metrics_enabled"):
+        return "", 404
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+    return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
 
 
 @app.get("/accounts")

@@ -28,3 +28,6 @@ structlog~=24.0
 
 # HTTP async client (Fase 3.1 — HumanBrowsingAsync usa httpx en lugar de requests)
 httpx~=0.27
+
+# Prometheus metrics (Fase 3.3b)
+prometheus-client~=0.21
