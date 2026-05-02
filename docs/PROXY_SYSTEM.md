@@ -241,14 +241,71 @@ _PROXY_CACHE_TTL_S = 30     # cache de resoluciones (30s)
 
 ```bash
 # "Missing dependencies for SOCKS support"
-./setup_phone_proxy.sh --status
-# → verifica que esté usando /home/angel/Proyectos/.venv/bin/python3
+.venv/bin/python facebook_auto_poster/proxy_cli.py status
+# → usa automáticamente el venv con PySocks
 
 # Teléfono desconectado
-./setup_phone_proxy.sh --status
+.venv/bin/python facebook_auto_poster/proxy_cli.py status
 # → si muestra OFFLINE, reconectar cable USB y ejecutar:
-./setup_phone_proxy.sh --fix phone1_sim
+.venv/bin/python facebook_auto_poster/proxy_cli.py fix phone1_sim
 
 # Ver todas las rotaciones LRU ocurridas
 tail -f facebook_auto_poster/logs/main.log | grep "ROTACIÓN"
+
+# Verificar que el USB no consume datos del SIM
+ip route show default
+# → solo debe aparecer "dev wlo1" (WiFi), NO "dev enx*"
+
+# Forzar corrección de rutas USB
+.venv/bin/python -c "import sys; sys.path.insert(0,'facebook_auto_poster'); import proxy_manager; proxy_manager._ensure_usb_never_default()"
+```
+
+---
+
+## Protección automática de rutas USB (2026-05-01)
+
+### Problema
+
+Al conectar un teléfono por USB tethering, NetworkManager crea un perfil con `never-default=no`. Como la métrica de la ruta USB (100) es menor que WiFi (600), **todo el tráfico del sistema** (no solo el navegador) pasa por los datos del SIM. Esto causa:
+- Consumo innecesario de datos móviles
+- La IP "directa" y la IP "proxy" muestran el mismo valor (WiFi bypass falso)
+- El servidor pierde conectividad WiFi para API, webhooks y panel admin
+
+### Solución
+
+`proxy_manager._ensure_usb_never_default()` — se ejecuta en 2 momentos:
+
+| Momento | Disparador |
+|---------|-----------|
+| Arranque | `proxy_manager.start()` la llama sincrónicamente |
+| Cada 120s | El daemon health checker la incluye en su ciclo |
+
+**Qué hace por cada interfaz USB (`enx*`, `usb*`, `rndis*`, `enu*`):**
+
+```
+1. nmcli connection modify → ipv4.never-default=yes, autoconnect-priority=-999
+2. nmcli device reapply → fuerza el cambio sin desconectar
+3. resolvectl domain <iface> ~. → bloquea consultas DNS por USB
+```
+
+### Verificación
+
+```bash
+# Estado actual (debe decir yes)
+nmcli -t -f ipv4.never-default connection show "Conexión cableada X"
+
+# Ruta por defecto (solo debe aparecer WiFi)
+ip route show default
+```
+
+### Permisos (PolicyKit)
+
+En Ubuntu los usuarios locales pueden modificar conexiones NM sin autenticación. Si en otro sistema `nmcli modify` pide contraseña:
+
+```bash
+# /etc/polkit-1/localauthority/50-local.d/10-nm-own.pkla
+[Allow user to modify own connections]
+Identity=unix-user:angel
+Action=org.freedesktop.NetworkManager.settings.modify.own
+ResultAny=yes
 ```

@@ -119,3 +119,37 @@ Cada bug incluye: sintoma observable, como verificar si existe en la otra rama, 
 - **Verificacion:** Comparar `loadAccounts()` con `loadTemplates()`. Ambas deben seguir la misma estructura de validacion HTTP.
 - **Fix aplicado:** Mismo patron de validacion aplicado a ambas funciones.
 - **Archivos modificados:** `templates/publish.html`
+
+---
+
+## T11 — Soporte multi-foto (1–5 imagenes) en publicacion
+
+- **Archivos:** `facebook_poster.py`, `api_server.py`, `account_manager.py`, `job_store.py`, `templates/publish.html`, `templates/admin.html`
+- **Descripcion:** El sistema solo soportaba 1 imagen por publicacion. Facebook permite carrusel de hasta 5 fotos. Se migro de `image_path: str` a `image_paths: list[str]` en toda la cadena.
+- **Verificacion:**
+  - Buscar `image_path: str | None` en `facebook_poster.py` → debe ser `image_paths: list[str] | None`
+  - Buscar `_attach_image(self, image_path: str)` → debe ser `_attach_image(self, image_paths: list[str])`
+  - Buscar `_MAX_IMAGES = 5` en `api_server.py`
+  - Buscar `_safe_image_paths()` en `api_server.py` (normaliza lista de paths)
+  - En `publish.html`, buscar `multiple` en el `<input type="file">` de imagenes
+  - En `admin.html`, buscar `tplNewFiles` y `tplExistingPaths` (estado del modal de plantillas)
+- **Fix aplicado:**
+  - `facebook_poster.py`: `_attach_image()` acepta lista de paths, `publish()` usa `image_paths: list[str]`
+  - `api_server.py`: `_safe_image_paths()` valida y normaliza lista, `_extract_payload()` soporta multipart multi-file y JSON con `image_paths`
+  - `account_manager.py`: `image_path` → `image_paths` en worker y AccountManager
+  - `templates/publish.html`: input `multiple`, previews con carrusel visual, `handleCustomImageChange()`
+  - `templates/admin.html`: modal de plantillas con previews multi-imagen, `handleTemplateImagesChange()`
+- **Archivos modificados:** `facebook_poster.py`, `api_server.py`, `account_manager.py`, `job_store.py`, `templates/publish.html`, `templates/admin.html`
+
+---
+
+## T12 — Soporte para grupos de compra/venta (formulario de ventas)
+
+- **Archivo:** `facebook_poster.py` — `publish()`
+- **Sintoma:** Grupos de Facebook diseñados para ventas usan un formulario diferente. El boton del compositor dice "Vender algo" en vez de "Crear publicacion". Los selectores estandar no lo encuentran → `TimeoutError` tras 3 intentos.
+- **Verificacion:** Buscar en `facebook_poster.py` los selectores `Vender algo`, `Sell something`, `Crear publicación de venta` en la lista de composer. Si no existen, el bug esta presente. Verificar tambien la seccion de deteccion de formulario de ventas (`is_sales_form`) y los tabs de cambio (`Publicación`, `Post`).
+- **Fix aplicado (3 fases):**
+  1. **Deteccion del boton:** 6 selectores nuevos para botones de venta
+  2. **Deteccion del formulario:** indicadores como "Elige el tipo", "Precio", "Condicion", "Articulo en venta"
+  3. **Cambio a publicacion normal:** busca pestaña "Publicacion"/"Post" y cambia. Si no existe, salta el grupo con `WARNING` claro + screenshot
+- **Archivos modificados:** `facebook_poster.py`

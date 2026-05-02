@@ -12,7 +12,10 @@
       "Bash(dpkg -l)",
       "Bash(awk '{print $1,$2,$3}')",
       "Bash(pip3 list *)",
-      "Bash(/home/angel/Proyectos/.venv/bin/pip list *)"
+      "Bash(/home/angel/Proyectos/.venv/bin/pip list *)",
+      "Bash(git commit -m 'fix: resolver 7 bugs críticos en sistema de plantillas *)",
+      "Bash(sqlite3 facebook_auto_poster/jobs.db \"SELECT id, type, status, group_ids, accounts, finished_at FROM jobs ORDER BY created_at DESC LIMIT 10;\")",
+      "Bash(.venv/bin/python -c ' *)"
     ]
   }
 }

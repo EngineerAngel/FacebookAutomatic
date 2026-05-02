@@ -17,11 +17,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |------|---------------|
 | `config.py` | ENV loading, `AccountConfig` dataclass, fingerprint + timezone helpers |
 | `job_store.py` | SQLite schema, all DB operations |
-| `facebook_poster.py` | Patchright login + publish (one instance per account) |
-| `account_manager.py` | Orchestrates sequential / parallel sessions |
-| `api_server.py` | Flask REST API + admin panel |
+| `facebook_poster.py` | Patchright login + publish (one instance per account). Soporta multi-foto (1-5) y grupos compra/venta |
+| `account_manager.py` | Orchestrates sequential / parallel sessions. `skip_hour_check` para publicaciones manuales |
+| `api_server.py` | Flask REST API + admin panel. `_safe_image_paths()` para multi-foto |
 | `scheduler_runner.py` | Daemon that polls for scheduled jobs every 30s |
-| `main.py` | Entry point (API + scheduler) |
+| `main.py` | Entry point (API + scheduler). Inicializa `proxy_manager.start()` |
+| `proxy_manager.py` | Proxy SIM pool: health checks, LRU assignment, `_ensure_usb_never_default()` |
+| `proxy_cli.py` | CLI simplificado para gestión de proxies (reemplaza `setup_phone_proxy.sh`) |
 | `gemini_commenter.py` | Gemini API integration (human-like comments during warmup) |
 | `human_browsing.py` | Feed warmup before posting |
 | `webhook.py` | Async callbacks to OpenClaw |
@@ -192,10 +194,10 @@ sqlite3 facebook_auto_poster/jobs.db "SELECT id, status FROM jobs ORDER BY creat
 Las fases (1/2/3) se desarrollan en otra rama por otro equipo. Esta rama (`produccion_temp`) contiene fixes provisionales.
 
 Documentacion de verificacion de bugs en `docs/`:
-- `docs/VERIFICACION_TEMPLATES.md` — 10 bugs del sistema de plantillas
-- `docs/VERIFICACION_PROXIES.md` — 11 bugs del sistema de proxies + tunel
-- `docs/VERIFICACION_GENERAL.md` — 10 bugs generales (admin, DB, grupos, horario)
-- `docs/PROXY_SYSTEM.md` — Referencia tecnica del sistema de proxies SIM
+- `docs/VERIFICACION_TEMPLATES.md` — 12 bugs del sistema de plantillas (incluye multi-foto y grupos compra/venta)
+- `docs/VERIFICACION_PROXIES.md` — 14 bugs del sistema de proxies + tunel (incluye proteccion de rutas USB)
+- `docs/VERIFICACION_GENERAL.md` — 13 bugs generales (admin, DB, grupos, horario, group_ids pipeline)
+- `docs/PROXY_SYSTEM.md` — Referencia tecnica del sistema de proxies SIM (incluye proteccion automatica de rutas USB)
 
 ## Proxy Pool SIM (plan 1.1 — implementado)
 
@@ -212,11 +214,10 @@ Servidor (ASUS TUF)
 ### Herramienta de gestión
 
 ```bash
-./setup_phone_proxy.sh                    # escaneo automático
-./setup_phone_proxy.sh --add              # agregar teléfono nuevo
-./setup_phone_proxy.sh --status           # health check de todos los nodos
-./setup_phone_proxy.sh --test socks5://IP:PORT
-./setup_phone_proxy.sh --assign NODE CUENTA
+.venv/bin/python facebook_auto_poster/proxy_cli.py setup     # setup automático
+.venv/bin/python facebook_auto_poster/proxy_cli.py status    # health check de todos los nodos
+.venv/bin/python facebook_auto_poster/proxy_cli.py test      # probar conectividad
+.venv/bin/python facebook_auto_poster/proxy_cli.py fix NODE  # re-detectar IP
 ```
 
 ### Nodos activos
@@ -231,6 +232,7 @@ El USB tethering toma la ruta por defecto automáticamente vía DHCP. Para evita
 
 1. **NetworkManager** — perfil `"Conexión cableada 2"` tiene `ipv4.never-default yes`
 2. **Dispatcher script** — `/etc/NetworkManager/dispatcher.d/99-no-usb-default-route` elimina la ruta por defecto de cualquier interfaz `usb*/rndis*/enx*/enu*` al conectarse
+3. **`proxy_manager._ensure_usb_never_default()`** — protección proactiva: se ejecuta al arrancar y cada 120s. Verifica todas las interfaces USB y corrige `never-default` + `nmcli device reapply` + bloquea DNS. No requiere sudo en Ubuntu.
 
 ### Pillofon — APN requerido
 

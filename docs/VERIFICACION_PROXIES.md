@@ -151,3 +151,58 @@ No es un bug, pero es una mejora significativa que el otro equipo debe conocer:
   - `_evict_lru_and_assign()` — expulsa LRU y reasigna
 - **Verificacion:** Buscar estas funciones en `proxy_manager.py`. Si `resolve_proxy()` solo lee asignaciones existentes sin logica de asignacion dinamica, la mejora no esta presente.
 - **Archivos modificados:** `proxy_manager.py`, `job_store.py` (columna `last_used_at` en `account_proxy_assignment`)
+
+---
+
+## P12 — USB tethering consume datos del SIM (ruta por defecto)
+
+- **Archivos:** `proxy_manager.py`, `proxy_cli.py`
+- **Sintoma:** Al conectar un telefono por USB, NetworkManager crea automaticamente un perfil con `never-default=no`. La metrica de la ruta USB (100) es menor que WiFi (600), por lo que **todo el trafico del sistema** pasa por los datos del SIM. La IP "directa" y la IP "proxy" muestran el mismo valor (WiFi bypass falso).
+- **Causa:** Cada vez que se conecta un telefono con una MAC diferente (o mismo telefono en distinto puerto USB), NM crea un perfil nuevo sin `never-default`. El dispatcher script solo corrige reactivamente.
+- **Verificacion:** 
+  ```bash
+  ip route show default
+  # Si aparece "dev enx*" con metrica < 600, el bug esta presente
+  nmcli -t -f ipv4.never-default connection show "Conexión cableada X"
+  # Si dice "no", el bug esta presente
+  ```
+- **Fix aplicado:**
+  1. `proxy_manager._ensure_usb_never_default()` — funcion que corre al arrancar y cada 120s en el health checker:
+     - Detecta todas las interfaces `enx*/usb*/rndis*/enu*` con estado UP/UNKNOWN
+     - Para cada una, verifica `never-default=yes` en su perfil NM
+     - Si no, lo corrige con `nmcli modify` + `nmcli device reapply`
+     - Bloquea DNS por USB con `resolvectl domain <iface> ~.`
+  2. `proxy_cli.py setup` tambien ejecuta esta proteccion al agregar un telefono nuevo
+- **Archivos modificados:** `proxy_manager.py` (`_ensure_usb_never_default`, import `subprocess`, `re`), `proxy_cli.py` (`_ensure_never_default` con `nmcli device reapply`)
+
+---
+
+## P13 — `setup_phone_proxy.sh` reemplazado por `proxy_cli.py`
+
+- **Archivos:** `proxy_cli.py` (nuevo, 558 lineas), `setup_phone_proxy.sh` (deprecated)
+- **Descripcion:** El script bash de 1027 lineas con wizard interactivo de 6 pasos fue reemplazado por un CLI en Python puro que usa `job_store` y `proxy_manager` directamente.
+- **Comandos:**
+  | Comando | Funcion |
+  |---------|---------|
+  | `proxy_cli.py setup` | Auto-detectar telefono → configurar NM → escanear proxy → registrar en DB → auto-asignar cuentas |
+  | `proxy_cli.py status` | Mostrar nodos + IP publica + cuentas asignadas |
+  | `proxy_cli.py test` | Probar conectividad sin modificar DB |
+  | `proxy_cli.py fix NODE` | Re-detectar IP del telefono si cambio |
+  | `proxy_cli.py assign NODE CUENTA` | Asignacion manual |
+  | `proxy_cli.py unassign CUENTA` | Quitar asignacion |
+- **Verificacion:** Ejecutar `.venv/bin/python proxy_cli.py status`. Si funciona, el sistema esta actualizado.
+- **Archivos modificados:** `proxy_cli.py` (nuevo), `setup_phone_proxy.sh` (marcado deprecated en header)
+
+---
+
+## Nota: `_ensure_usb_never_default` requiere PolicyKit o permisos NM
+
+En Ubuntu con NetworkManager, los usuarios locales pueden modificar conexiones sin autenticacion. Si en otro sistema `nmcli modify` pide contraseña, agregar regla PolicyKit:
+
+```bash
+# /etc/polkit-1/localauthority/50-local.d/10-nm-own.pkla
+[Allow user to modify own connections]
+Identity=unix-user:angel
+Action=org.freedesktop.NetworkManager.settings.modify.own
+ResultAny=yes
+```
