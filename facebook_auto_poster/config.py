@@ -58,6 +58,8 @@ CONFIG: dict = {
     "api_port": int(os.getenv("API_PORT", "5000")),
     # Fase 3.3b — Prometheus metrics (default OFF; activar con METRICS_ENABLED=1)
     "metrics_enabled": os.getenv("METRICS_ENABLED", "0").strip() == "1",
+    # Fase 3.4 — Adaptive DOM repair (default OFF; activar con ADAPTIVE_SELECTORS=1)
+    "adaptive_selectors_enabled": os.getenv("ADAPTIVE_SELECTORS", "0").strip() == "1",
     # Pool de workers (Fase 2.3): cuántos jobs (cada uno con potencialmente
     # varias cuentas) corren en paralelo. Más de 2-3 Chromes simultáneos
     # desde la misma IP/host aumenta detección.

@@ -31,3 +31,7 @@ httpx~=0.27
 
 # Prometheus metrics (Fase 3.3b)
 prometheus-client~=0.21
+
+# Adaptive DOM repair — Scrapling fingerprint + Gemini fallback (Fase 3.4)
+# Instalar SIN [fetchers] para evitar conflicto con patchright
+scrapling>=0.3,<1.0

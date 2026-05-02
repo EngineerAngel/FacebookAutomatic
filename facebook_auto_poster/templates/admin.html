@@ -209,6 +209,7 @@ tr:hover td { background: #151823; }
     <button class="tab-btn" data-tab="jobs">Jobs</button>
     <button class="tab-btn" data-tab="history">Logins</button>
     <button class="tab-btn" data-tab="metrics">Métricas</button>
+    <button class="tab-btn" data-tab="maintenance">Mantenimiento</button>
   </div>
 
   <!-- ══════ TAB: Cuentas ══════ -->
@@ -380,6 +381,39 @@ tr:hover td { background: #151823; }
     </div>
 
     <p style="color: #8892b0; font-size: 12px; margin-top: 1.5rem; text-align: center;">Se actualiza automáticamente cada 3 segundos</p>
+  </div>
+
+  <!-- ══════ TAB: Mantenimiento ══════ -->
+  <div id="tab-maintenance" class="tab-panel">
+    <div class="section-hdr">
+      <h2>Reparaciones de selectores</h2>
+      <button class="btn btn-edit btn-sm" onclick="loadRepairs()">&#8635; Actualizar</button>
+    </div>
+    <p style="color: #8892b0; font-size: 13px; margin-bottom: 1.5rem;">
+      Cuando Facebook cambia su interfaz, el sistema captura candidatos de reemplazo aquí.
+      Aprueba para activar en la próxima ejecución. Rechaza para descartar.
+    </p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Clave</th>
+            <th>Selector roto</th>
+            <th>Candidato</th>
+            <th>Confianza</th>
+            <th>Fuente</th>
+            <th>Fecha</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="repairs-body">
+          <tr><td colspan="7" class="empty">Sin reparaciones pendientes</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="color: #8892b0; font-size: 12px; margin-top: 1rem;">
+      Aprobar activa el candidato en la próxima ejecución. Rechazar lo descarta permanentemente.
+    </p>
   </div>
 
 </div><!-- /container -->
@@ -1169,6 +1203,55 @@ tabButtons.forEach(btn => {
       clearInterval(_metricsInterval);
       _metricsInterval = null;
     }
+  });
+});
+
+// ─── Mantenimiento — Reparaciones de selectores (Fase 3.4) ────────────────
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function loadRepairs() {
+  const { ok, data } = await api('GET', '/admin/api/selector-repairs');
+  const tbody = document.getElementById('repairs-body');
+  if (!ok || !data || data.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">Sin reparaciones pendientes</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.map(r => {
+    const conf = (r.confidence * 100).toFixed(0);
+    const date = r.created_at ? r.created_at.substring(0, 16).replace('T', ' ') : '—';
+    const source = r.source === 'scrapling' ? '<span style="color:#86efac">scrapling</span>' : '<span style="color:#96b4f5">gemini</span>';
+    return `<tr>
+      <td><code>${esc(r.selector_key)}</code></td>
+      <td style="font-size:11px; word-break:break-all; max-width:180px;">${esc(r.original)}</td>
+      <td style="font-size:11px; word-break:break-all; max-width:180px;">${esc(r.candidate)}</td>
+      <td style="text-align:center;">${conf}%</td>
+      <td style="text-align:center;">${source}</td>
+      <td style="font-size:11px;">${date}</td>
+      <td style="white-space:nowrap;">
+        <button class="btn btn-primary btn-sm" onclick="approveRepair('${r.id}')">Aprobar</button>
+        <button class="btn btn-danger btn-sm" style="margin-left:4px;" onclick="rejectRepair('${r.id}')">Rechazar</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function approveRepair(id) {
+  const { ok } = await api('POST', `/admin/api/selector-repairs/${id}/approve`);
+  if (ok) { toast('Selector aprobado', false); loadRepairs(); }
+  else toast('Error al aprobar', true);
+}
+
+async function rejectRepair(id) {
+  const { ok } = await api('POST', `/admin/api/selector-repairs/${id}/reject`);
+  if (ok) { toast('Reparacion rechazada', false); loadRepairs(); }
+  else toast('Error al rechazar', true);
+}
+
+tabButtons.forEach(btn => {
+  btn.addEventListener('click', function() {
+    if (this.getAttribute('data-tab') === 'maintenance') loadRepairs();
   });
 });
 

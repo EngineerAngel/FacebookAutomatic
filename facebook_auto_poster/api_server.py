@@ -995,6 +995,29 @@ def admin_clear_ban(name: str):
     return jsonify({"ok": True, "account": name})
 
 
+@app.get("/admin/api/selector-repairs")
+@admin_required
+def admin_list_selector_repairs():
+    """Lista reparaciones de selectores pendientes (Fase 3.4)."""
+    return jsonify(job_store.list_pending_repairs())
+
+
+@app.post("/admin/api/selector-repairs/<repair_id>/approve")
+@admin_required
+def admin_approve_repair(repair_id: str):
+    if not job_store.approve_repair(repair_id):
+        return jsonify({"error": "No encontrado"}), 404
+    return jsonify({"status": "approved"})
+
+
+@app.post("/admin/api/selector-repairs/<repair_id>/reject")
+@admin_required
+def admin_reject_repair(repair_id: str):
+    if not job_store.reject_repair(repair_id):
+        return jsonify({"error": "No encontrado"}), 404
+    return jsonify({"status": "rejected"})
+
+
 @app.get("/admin/api/proxies")
 @admin_required
 def admin_list_proxies():

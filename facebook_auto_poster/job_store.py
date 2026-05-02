@@ -169,6 +169,19 @@ def init_db() -> None:
                 secondary_node TEXT REFERENCES proxy_nodes(id),
                 assigned_at    TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS selector_repairs (
+                id           TEXT PRIMARY KEY,
+                selector_key TEXT NOT NULL,
+                original     TEXT NOT NULL,
+                candidate    TEXT NOT NULL,
+                confidence   REAL DEFAULT 0.0,
+                source       TEXT DEFAULT 'gemini',
+                html_snippet TEXT,
+                status       TEXT DEFAULT 'pending',
+                created_at   TEXT DEFAULT (datetime('now')),
+                reviewed_at  TEXT
+            );
         """)
 
         # Migraciones seguras — no fallan si la columna ya existe
@@ -1151,3 +1164,77 @@ def list_proxy_assignments() -> list[dict]:
                ORDER BY p.account_name"""
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Selector repairs (Fase 3.4 — auto-reparación DOM)
+# ---------------------------------------------------------------------------
+
+def create_selector_repair(
+    selector_key: str,
+    original: str,
+    candidate: str,
+    confidence: float,
+    source: str,
+    html_snippet: str | None,
+) -> str:
+    """Guarda un candidato de reparación de selector. Retorna el id creado."""
+    import uuid as _uuid
+    repair_id = _uuid.uuid4().hex[:12]
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO selector_repairs
+               (id, selector_key, original, candidate, confidence, source, html_snippet)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (repair_id, selector_key, original, candidate, confidence, source, html_snippet),
+        )
+    return repair_id
+
+
+def list_pending_repairs() -> list[dict]:
+    """Lista reparaciones con status='pending' ordenadas por fecha desc."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT id, selector_key, original, candidate, confidence, source,
+                      html_snippet, status, created_at
+               FROM selector_repairs
+               WHERE status = 'pending'
+               ORDER BY created_at DESC"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def approve_repair(repair_id: str) -> bool:
+    """Cambia status a 'approved'. Retorna True si se encontró y actualizó."""
+    with _connect() as conn:
+        cur = conn.execute(
+            """UPDATE selector_repairs
+               SET status = 'approved', reviewed_at = datetime('now')
+               WHERE id = ? AND status = 'pending'""",
+            (repair_id,),
+        )
+        return cur.rowcount > 0
+
+
+def reject_repair(repair_id: str) -> bool:
+    """Cambia status a 'rejected'. Retorna True si se encontró y actualizó."""
+    with _connect() as conn:
+        cur = conn.execute(
+            """UPDATE selector_repairs
+               SET status = 'rejected', reviewed_at = datetime('now')
+               WHERE id = ? AND status = 'pending'""",
+            (repair_id,),
+        )
+        return cur.rowcount > 0
+
+
+def get_approved_selector(selector_key: str) -> str | None:
+    """Retorna el candidato aprobado más reciente para la clave dada, o None."""
+    with _connect() as conn:
+        row = conn.execute(
+            """SELECT candidate FROM selector_repairs
+               WHERE selector_key = ? AND status = 'approved'
+               ORDER BY reviewed_at DESC LIMIT 1""",
+            (selector_key,),
+        ).fetchone()
+        return row["candidate"] if row else None

@@ -42,6 +42,7 @@ import job_store
 import proxy_manager
 import webhook
 import metrics
+from adaptive_selector import AdaptivePlaywrightBridge
 from gemini_commenter import GeminiCommenter
 from human_browsing import HumanBrowsingAsync
 from logging_config import bind_account, get_formatter, unbind_account
@@ -114,6 +115,7 @@ class FacebookPosterAsync:
         self.context: BrowserContext | None = None
         self.page: Page | None = None
         self._em: Emunium | None = None  # type: ignore[type-arg]
+        self._bridge: AdaptivePlaywrightBridge | None = None
 
         # Gemini / text variator — same init as sync version
         self._gemini: GeminiCommenter | None = None
@@ -163,6 +165,7 @@ class FacebookPosterAsync:
         """Start Playwright and build browser. Called by __aenter__."""
         self._pw = await async_playwright().start()
         self.context, self.page = await self._build_browser()
+        self._bridge = AdaptivePlaywrightBridge(self.page)
 
         if self.config.get("emunium_enabled", True) and _HAS_EMUNIUM and not self.config["browser_headless"]:
             try:
@@ -771,7 +774,7 @@ class FacebookPosterAsync:
             self.logger.info("[Login] URL actual: %s", self.page.url)
 
             self.logger.info("[Login] Paso 3/4 — Esperando formulario de login ...")
-            email_input = self.page.locator("//input[@name='email']").first
+            email_input = await self._bridge.get_locator("login_email", "//input[@name='email']", timeout=20000)
             await email_input.wait_for(state="visible", timeout=20000)
             self.logger.info("[Login] Formulario encontrado. Ingresando credenciales ...")
             await self.human_wait()
@@ -781,7 +784,7 @@ class FacebookPosterAsync:
 
             await self.human_wait(0.5, 1.5)
 
-            pass_input = self.page.locator("//input[@name='pass']").first
+            pass_input = await self._bridge.get_locator("login_password", "//input[@name='pass']", timeout=20000)
             await pass_input.wait_for(state="visible", timeout=20000)
             await self._human_click(pass_input)
             await pass_input.fill("")
@@ -885,7 +888,8 @@ class FacebookPosterAsync:
                 if not await self._wait_for_manual_resolution():
                     return False
 
-            await self.page.locator("//div[@role='main']").first.wait_for(state="attached", timeout=15000)
+            main_div = await self._bridge.get_locator("group_loaded", "//div[@role='main']", timeout=15000)
+            await main_div.wait_for(state="attached", timeout=15000)
             self.logger.info("Group %s loaded", group_id)
             return True
         except Exception:
@@ -936,18 +940,24 @@ class FacebookPosterAsync:
                     continue
 
                 self.logger.info("[Publish] Buscando compositor del grupo...")
-                composer = await self._find_first([
-                    "//span[text()='Escribe algo...']",
-                    "//span[text()='Write something...']",
-                    "//span[contains(text(),'Escribe algo')]",
-                    "//span[contains(text(),'Write something')]",
-                    "//div[@aria-label='Escribe algo...']",
-                    "//div[@aria-label='Write something...']",
-                    "//div[@data-pagelet='GroupInlineComposer']//div[@role='button']",
-                    "//div[@aria-label='Crear publicación']",
-                    "//div[@aria-label='Create post']",
-                    "//span[contains(text(),'Crear publicaci')]",
-                ], timeout=15)
+                try:
+                    composer = await self._bridge.get_locator(
+                        "composer_open", "//div[@aria-label='Crear publicación']"
+                    )
+                    await composer.wait_for(state="visible", timeout=5000)
+                except Exception:
+                    composer = await self._find_first([
+                        "//span[text()='Escribe algo...']",
+                        "//span[text()='Write something...']",
+                        "//span[contains(text(),'Escribe algo')]",
+                        "//span[contains(text(),'Write something')]",
+                        "//div[@aria-label='Escribe algo...']",
+                        "//div[@aria-label='Write something...']",
+                        "//div[@data-pagelet='GroupInlineComposer']//div[@role='button']",
+                        "//div[@aria-label='Crear publicación']",
+                        "//div[@aria-label='Create post']",
+                        "//span[contains(text(),'Crear publicaci')]",
+                    ], timeout=15)
                 await self._human_click(composer)
                 await self.human_wait(2, 4)
 
@@ -959,7 +969,11 @@ class FacebookPosterAsync:
                     "//div[@role='dialog'][.//div[@contenteditable='true']]",
                 ], timeout=10)
 
-                editor = modal.locator("xpath=.//div[@contenteditable='true']").first
+                editor = await self._bridge.get_locator(
+                    "composer_editor",
+                    "//div[@role='dialog']//div[@contenteditable='true']",
+                    timeout=5000,
+                )
                 await editor.wait_for(state="visible", timeout=5000)
                 await self._human_click(editor)
                 await self.human_wait(0.5, 1)
@@ -984,14 +998,20 @@ class FacebookPosterAsync:
                     self.logger.warning("[Publish] Página con estado %s antes de publicar — reintentando", health)
                     continue
 
-                pub_btn = await self._find_first([
-                    "//div[@role='dialog']//div[@aria-label='Publicar']",
-                    "//div[@role='dialog']//div[@aria-label='Post']",
-                    "//div[@role='dialog']//button[@aria-label='Publicar']",
-                    "//div[@role='dialog']//button[@aria-label='Post']",
-                    "//div[@role='dialog']//div[@role='button'][contains(@aria-label,'ublicar')]",
-                    "//div[@role='dialog']//div[@role='button'][contains(@aria-label,'ost')]",
-                ], timeout=10)
+                try:
+                    pub_btn = await self._bridge.get_locator(
+                        "publish_button", "//div[@role='dialog']//div[@aria-label='Publicar']"
+                    )
+                    await pub_btn.wait_for(state="visible", timeout=5000)
+                except Exception:
+                    pub_btn = await self._find_first([
+                        "//div[@role='dialog']//div[@aria-label='Publicar']",
+                        "//div[@role='dialog']//div[@aria-label='Post']",
+                        "//div[@role='dialog']//button[@aria-label='Publicar']",
+                        "//div[@role='dialog']//button[@aria-label='Post']",
+                        "//div[@role='dialog']//div[@role='button'][contains(@aria-label,'ublicar')]",
+                        "//div[@role='dialog']//div[@role='button'][contains(@aria-label,'ost')]",
+                    ], timeout=10)
                 await self.human_wait(0.3, 0.8)
                 await self._human_click(pub_btn)
 

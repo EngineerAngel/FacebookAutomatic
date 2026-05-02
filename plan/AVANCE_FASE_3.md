@@ -1,7 +1,7 @@
 # Avance — Fase 3: Refactor arquitectónico
 
 > **Última actualización:** 2026-05-01
-> **Estado:** 🔄 En progreso — Paso 0 + 3.5 + 3.3a + 3.1 + 3.2 + 3.3b completados. Siguiente: 3.4 (auto-reparación DOM con Scrapling).
+> **Estado:** 🔄 En progreso — Paso 0 + 3.5 + 3.3a + 3.1 + 3.2 + 3.3b + 3.4 completados. Siguiente: 3.6 (spike mouse library, opcional) o cierre de Fase 3.
 > **Prerrequisito cumplido:** Fase 1 (6/6) + Fase 2 (9/9) completas e integradas en `master`.
 
 ---
@@ -26,7 +26,7 @@ Fase 3 moderniza la base técnica para soportar crecimiento (más cuentas, más 
 | 3 | 3.1 | Playwright async + consolidación async-only | ✅ Completado | 2026-05-01 |
 | 4 | 3.2 | FastAPI montado en `/v2` + Pydantic validation | ✅ Completado | 2026-05-01 |
 | 5 | 3.3b | Prometheus + Grafana + tab de métricas en admin | ✅ Completado | 2026-05-01 |
-| 6 | 3.4 | DOM snapshots + auto-reparación selectores (con Scrapling) | ⏳ Pendiente | — |
+| 6 | 3.4 | DOM snapshots + auto-reparación selectores (con Scrapling) | ✅ Completado | 2026-05-01 |
 | 7 | 3.6 | Spike mouse library | ⏳ Pendiente (puede saltarse) | — |
 | 8 | 3.7 | Separar API/workers | ⏳ Pendiente (opcional) | — |
 
@@ -137,26 +137,37 @@ Una única ruta de ejecución → menos bugs, menos mantenimiento, base más lim
 
 ---
 
-### Ítem 3.4 — DOM snapshots + auto-reparación de selectores
+### Ítem 3.4 — DOM snapshots + auto-reparación de selectores ✅
 
-**Qué resuelve:** cuando Facebook cambia su interfaz y rompe un selector, el sistema lo detecta en horas (no días) y Gemini sugiere la corrección. Un humano aprueba antes de aplicar.
+**Completado 2026-05-01.**
 
-- `tests/dom_snapshots/`: HTMLs sanitizados de feed, composer, post-publicación, soft-ban.
-- `scripts/scrub_snapshot.py`: elimina IDs/tokens antes de commitear.
-- `tests/integration/test_selectors.py`: valida XPaths de `facebook_poster_async.py` contra snapshots.
-- `selector_repair.py`: detecta `TimeoutError` en selector conocido → captura HTML → llama Gemini → guarda candidato en DB → admin aprueba desde el panel.
+**Archivos creados:**
+- `adaptive_selector.py`: `AdaptivePlaywrightBridge` — genérico, sin deps de FB. 3 niveles: DB aprobado → Scrapling adaptive → Gemini fire-and-forget.
+- `selector_repair.py`: `SelectorRepairService` — llama Gemini, parsea candidatos JSON, escribe a DB.
+- `tests/unit/test_adaptive_selector.py`: 11 tests (bridge, helpers) — todos pasan.
+- `tests/dom_snapshots/README.md`: instrucciones para capturar y sanitizar snapshots.
+- `scripts/scrub_snapshot.py`: elimina IDs/tokens/scripts de HTMLs antes de commitear.
+
+**Archivos modificados:**
+- `job_store.py`: tabla `selector_repairs` + 5 funciones CRUD.
+- `facebook_poster_async.py`: 6 selectores críticos envueltos con `AdaptivePlaywrightBridge`.
+- `api_server.py`: endpoints `/admin/api/selector-repairs` (list/approve/reject).
+- `templates/admin.html`: tab "Mantenimiento" con tabla de repairs pendientes.
+- `config.py`: flag `adaptive_selectors_enabled`.
+- `requirements.txt`: `scrapling>=0.3,<1.0` (sin `[fetchers]`).
 
 **Flujo de auto-reparación:**
 ```
-TimeoutError en selector conocido
-  → capturar HTML del estado actual
-  → Gemini: "el selector X ya no funciona, ¿dónde está ahora?"
-  → Gemini devuelve candidatos con nivel de confianza
-  → guardar en DB como "pendiente de aprobación"
-  → admin aprueba desde el panel → activo en la siguiente ejecución
+get_locator() → selector original falla (PatchrightTimeout)
+  → Scrapling: busca por fingerprint adaptativo en HTML actual
+     ├─ Encontrado → guarda repair(source='scrapling') en DB, devuelve locator
+     └─ No encontrado → fire-and-forget SelectorRepairService (Gemini)
+          → Gemini devuelve JSON de candidatos con confidence
+          → guarda repairs(source='gemini', status='pending') en DB
+          → admin aprueba en tab "Mantenimiento" → activo en próxima ejecución
 ```
 
-**Nivel 3 (reparación completamente automática) descartado** — un selector equivocado puede hacer clicks inesperados en sesiones reales.
+**Activación:** `ADAPTIVE_SELECTORS=1` en `.env` (default OFF — sin la flag, zero overhead).
 
 ---
 
