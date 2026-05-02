@@ -60,6 +60,9 @@ CONFIG: dict = {
     "metrics_enabled": os.getenv("METRICS_ENABLED", "0").strip() == "1",
     # Fase 3.4 — Adaptive DOM repair (default OFF; activar con ADAPTIVE_SELECTORS=1)
     "adaptive_selectors_enabled": os.getenv("ADAPTIVE_SELECTORS", "0").strip() == "1",
+    # Fase 3.7 — Separar API y worker en procesos distintos (default OFF)
+    "split_processes": os.getenv("SPLIT_PROCESSES", "0").strip() == "1",
+    "worker_poll_interval": int(os.getenv("WORKER_POLL_INTERVAL", "5")),
     # Pool de workers (Fase 2.3): cuántos jobs (cada uno con potencialmente
     # varias cuentas) corren en paralelo. Más de 2-3 Chromes simultáneos
     # desde la misma IP/host aumenta detección.

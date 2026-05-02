@@ -1,0 +1,17 @@
+[Unit]
+Description=Facebook AutoPoster — Proceso Worker (Playwright)
+After=network.target fb-api.service
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/facebook_auto_poster
+ExecStart=/opt/venv/bin/python worker_main.py
+Environment=SPLIT_PROCESSES=1
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

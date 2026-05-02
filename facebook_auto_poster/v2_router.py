@@ -81,7 +81,8 @@ def list_accounts():
 )
 def handle_post(body: PostRequest):
     # Importar aquí para evitar importación circular en el arranque
-    from api_server import _enqueue_job, _filter_rate_limited_accounts, _safe_image_path
+    from api_server import _enqueue_job, _safe_image_path
+    from worker_core import filter_rate_limited_accounts as _filter_rate_limited_accounts
 
     # Validar image_path si se proporcionó
     image_path = None

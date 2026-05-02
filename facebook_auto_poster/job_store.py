@@ -631,6 +631,33 @@ def mark_running_as_interrupted() -> int:
         return int(cur.rowcount)
 
 
+def claim_pending_job() -> dict | None:
+    """Claim atómico de un job inmediato pendiente. Seguro para múltiples procesos.
+
+    SELECT + UPDATE con CAS (AND status='pending') garantiza que dos workers
+    concurrentes no tomen el mismo job. SQLite WAL serializa las escrituras.
+    Retorna el job como dict, o None si no hay pendientes.
+    """
+    now = datetime.now().isoformat()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT id, text, accounts, image_path, callback_url "
+            "FROM jobs WHERE type='immediate' AND status='pending' "
+            "ORDER BY created_at ASC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        updated = conn.execute(
+            "UPDATE jobs SET status='running', started_at=? "
+            "WHERE id=? AND status='pending'",
+            (now, row["id"]),
+        ).rowcount
+        if updated == 0:
+            return None  # race condition — otro proceso se adelantó
+        conn.commit()
+        return dict(row)
+
+
 # ---------------------------------------------------------------------------
 # Métricas para healthcheck
 # ---------------------------------------------------------------------------

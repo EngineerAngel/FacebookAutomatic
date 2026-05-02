@@ -96,18 +96,22 @@ def _maybe_purge_rate_limits() -> None:
     _last_purge_ts = now
 
 
-def _loop() -> None:
+def _loop(dispatch_fn=None) -> None:
     logger.info("Scheduler loop arrancando (poll=%ds)", POLL_SECONDS)
     while not _stop_event.is_set():
         try:
             due = job_store.pop_due_scheduled(datetime.now())
             for job in due:
-                threading.Thread(
-                    target=_run_scheduled_job,
-                    args=(job,),
-                    daemon=True,
-                    name=f"scheduled-{job['id']}",
-                ).start()
+                if dispatch_fn is not None:
+                    # Modo biproceso: el worker controla concurrencia via su executor
+                    dispatch_fn(_run_scheduled_job, job)
+                else:
+                    threading.Thread(
+                        target=_run_scheduled_job,
+                        args=(job,),
+                        daemon=True,
+                        name=f"scheduled-{job['id']}",
+                    ).start()
             _maybe_purge_rate_limits()
         except Exception:
             logger.exception("Error en el loop del scheduler")
@@ -116,9 +120,16 @@ def _loop() -> None:
     logger.info("Scheduler loop detenido")
 
 
-def start() -> threading.Thread:
+def start(dispatch_fn=None) -> threading.Thread:
+    """Arranca el scheduler.
+
+    dispatch_fn: si se proporciona, los jobs agendados se despachan a través
+    de esta función en lugar de lanzar threads crudos. Usar en modo biproceso
+    para que los scheduled jobs respeten MAX_CONCURRENT_WORKERS del worker.
+    Ejemplo: scheduler_runner.start(dispatch_fn=executor.submit)
+    """
     _stop_event.clear()
-    t = threading.Thread(target=_loop, daemon=True, name="scheduler-runner")
+    t = threading.Thread(target=_loop, args=(dispatch_fn,), daemon=True, name="scheduler-runner")
     t.start()
     return t
 

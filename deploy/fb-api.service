@@ -1,0 +1,17 @@
+[Unit]
+Description=Facebook AutoPoster — Proceso API
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/facebook_auto_poster
+ExecStart=/opt/venv/bin/python api_main.py
+Environment=SPLIT_PROCESSES=1
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
