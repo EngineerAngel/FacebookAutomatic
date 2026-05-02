@@ -51,6 +51,8 @@ CONFIG: dict = {
     "max_retries": 3,
     "text_variation_mode": "gemini",  # "gemini" | "zero_width" | "off"
     "structured_logging": os.getenv("STRUCTURED_LOGGING", "0").strip() == "1",
+    # Fase 3.2 — FastAPI montado en /v2 (default OFF; activar con USE_FASTAPI=1)
+    "use_fastapi": os.getenv("USE_FASTAPI", "0").strip() == "1",
 
     "execution_mode": os.getenv("EXECUTION_MODE", "sequential").strip().lower(),
     "api_port": int(os.getenv("API_PORT", "5000")),

@@ -10,6 +10,8 @@ emunium~=3.0
 # API + serving
 flask~=3.0
 waitress~=3.0
+fastapi~=0.136
+uvicorn~=0.46
 
 # Config / networking
 python-dotenv~=1.0

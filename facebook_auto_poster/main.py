@@ -260,18 +260,28 @@ def main() -> None:
     _install_signal_handlers()
 
     port = CONFIG.get("api_port", 5000)
-    main_logger.info(
-        "Facebook Auto-Poster arrancando con waitress — API 0.0.0.0:%d | scheduler activo",
-        port,
-    )
 
     # Iniciar túnel público HTTPS (ngrok o cloudflare, estático si está configurado)
     start_tunnel(port)
 
-    # waitress: servidor WSGI de producción (vs Flask dev server)
-    # threads=8 cubre requests HTTP del API — no tiene relación con los
-    # workers de browser (eso lo gestiona 2.3 con ThreadPoolExecutor separado)
-    serve(app, host="0.0.0.0", port=port, threads=8, ident="FBAutoPoster/1.0")
+    if CONFIG.get("use_fastapi", False):
+        # Fase 3.2 — FastAPI (uvicorn ASGI): Flask montado como sub-app en /
+        import uvicorn
+        from v2_app import create_app
+        asgi_app = create_app(app)
+        main_logger.info(
+            "Facebook Auto-Poster arrancando con uvicorn (FastAPI+Flask) — "
+            "API 0.0.0.0:%d | /v2/* FastAPI | /* Flask | /docs Swagger",
+            port,
+        )
+        uvicorn.run(asgi_app, host="0.0.0.0", port=port, log_level="warning")
+    else:
+        # Default — waitress WSGI (sin cambios respecto a Fase 2)
+        main_logger.info(
+            "Facebook Auto-Poster arrancando con waitress — API 0.0.0.0:%d | scheduler activo",
+            port,
+        )
+        serve(app, host="0.0.0.0", port=port, threads=8, ident="FBAutoPoster/1.0")
 
 
 if __name__ == "__main__":
