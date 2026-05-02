@@ -17,6 +17,8 @@ automáticamente en la siguiente llamada a resolve_proxy.
 
 import json
 import logging
+import re
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -71,10 +73,84 @@ def _check_node(node: dict) -> tuple[bool, str]:
         return False, ""
 
 
+def _ensure_usb_never_default() -> None:
+    """Protege las interfaces USB contra consumo de datos del SIM.
+
+    Verifica que todas las interfaces de tethering USB (enx*, usb*, rndis*,
+    enu*) tengan never-default=yes en NetworkManager y bloquea DNS por ellas.
+    Se ejecuta al arrancar y cada CHECK_INTERVAL_S durante la operacion.
+    Solo loguea si encuentra y corrige un problema.
+    """
+    try:
+        out = subprocess.run(
+            ["ip", "-br", "link", "show"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except Exception:
+        return
+
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        iface = parts[0].rstrip("@")
+        state = parts[1]
+        if not re.match(r"^(usb|rndis|enx|enu)", iface):
+            continue
+        if state not in ("UP", "UNKNOWN"):
+            continue
+
+        try:
+            # Buscar perfil NM asociado
+            nm_out = subprocess.run(
+                ["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+            profile = None
+            for nl in nm_out.splitlines():
+                np = nl.strip().split(":")
+                if len(np) >= 2 and np[1] == iface:
+                    profile = np[0]
+                    break
+            if not profile:
+                continue
+
+            # Verificar never-default
+            nd_out = subprocess.run(
+                ["nmcli", "-t", "-f", "ipv4.never-default",
+                 "connection", "show", profile],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+
+            if nd_out == "yes":
+                continue  # ya esta protegido
+
+            # Corregir
+            subprocess.run(
+                ["nmcli", "connection", "modify", profile,
+                 "ipv4.never-default", "yes",
+                 "connection.autoconnect-priority", "-999"],
+                capture_output=True, timeout=10,
+            )
+            subprocess.run(
+                ["nmcli", "device", "reapply", iface],
+                capture_output=True, timeout=10,
+            )
+            subprocess.run(
+                ["resolvectl", "domain", iface, "~."],
+                capture_output=True, timeout=5,
+            )
+            logger.info(
+                "[ProxyHealth] Ruta USB corregida: %s (%s) → never-default", iface, profile)
+        except Exception:
+            pass
+
+
 def _run_health_checker() -> None:
     logger.info("[ProxyHealth] Daemon iniciado (intervalo=%ds)", CHECK_INTERVAL_S)
     while True:
         try:
+            _ensure_usb_never_default()
             nodes = job_store.list_proxy_nodes()
             for node in nodes:
                 ok, ip = _check_node(node)
@@ -127,6 +203,7 @@ def start() -> None:
         if _started:
             return
         _started = True
+    _ensure_usb_never_default()
     threading.Thread(
         target=_run_health_checker, daemon=True, name="proxy-health-checker",
     ).start()

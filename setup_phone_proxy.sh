@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
+# ⚠ DEPRECATED — Usar proxy_cli.py en su lugar
 # setup_phone_proxy.sh — Gestión completa de proxies SIM via USB
 #
-# USO:
+# Este script ha sido reemplazado por facebook_auto_poster/proxy_cli.py
+# que es más simple, no requiere wizard interactivo y auto-configura todo.
+#
+#   python proxy_cli.py setup    # detectar teléfono + registrar + auto-asignar
+#   python proxy_cli.py status   # ver estado de nodos
+#   python proxy_cli.py test     # probar conectividad sin modificar DB
+#
+# USO LEGADO:
 #   ./setup_phone_proxy.sh                          # escaneo automático
 #   ./setup_phone_proxy.sh --add                    # agregar teléfono nuevo (interactivo)
 #   ./setup_phone_proxy.sh --test socks5://IP:PORT  # probar proxy específico
