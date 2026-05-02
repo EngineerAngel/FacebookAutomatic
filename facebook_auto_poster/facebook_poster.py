@@ -103,8 +103,18 @@ class FacebookPoster:
         self._callback_url = callback_url
 
         # -- per-account logger ------------------------------------------
+        # logging.getLogger() devuelve el mismo objeto (singleton) para el mismo
+        # nombre. Sin limpiar handlers previos, cada instancia acumula 2 más
+        # (FileHandler + StreamHandler), y cada mensaje se escribe N×2 veces
+        # tras N jobs para la misma cuenta. También desactivamos propagación al
+        # root logger (que tiene formato diferente y causaría líneas duplicadas).
         self.logger = logging.getLogger(f"poster.{account.name}")
         self.logger.setLevel(logging.DEBUG)
+        self.logger.propagate = False
+
+        for old_h in self.logger.handlers[:]:
+            old_h.close()
+            self.logger.removeHandler(old_h)
 
         os.makedirs(os.path.dirname(account.log_file), exist_ok=True)
         fh = logging.FileHandler(account.log_file, encoding="utf-8")
@@ -115,7 +125,7 @@ class FacebookPoster:
         self.logger.addHandler(fh)
 
         ch = logging.StreamHandler()
-        ch.setLevel(logging.DEBUG)
+        ch.setLevel(logging.INFO)
         ch.setFormatter(
             logging.Formatter("%(asctime)s - [%(name)s] - %(levelname)s - %(message)s")
         )
@@ -1547,3 +1557,7 @@ class FacebookPoster:
                 lock_file.unlink()
         except Exception:
             self.logger.debug("No se pudo eliminar .lock del profile", exc_info=True)
+
+        for h in self.logger.handlers[:]:
+            h.close()
+            self.logger.removeHandler(h)
