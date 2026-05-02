@@ -70,7 +70,7 @@ elif [ "$OS" = "Linux" ]; then
     if command -v apt-get &>/dev/null; then
         echo "      Descargando cloudflared (GitHub releases)..."
         ARCH_DEB="amd64"
-        [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ] && ARCH_DEB="arm64"
+        if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then ARCH_DEB="arm64"; fi
         CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH_DEB}"
         sudo curl -fsSL "$CF_URL" -o /usr/local/bin/cloudflared
         sudo chmod +x /usr/local/bin/cloudflared
@@ -90,8 +90,8 @@ if [ "$OS" = "Linux" ]; then
         # python3-xlib y scrot son necesarios para Emunium (mouse Bézier OS-level)
         # Solo aplican si hay entorno gráfico (X11 o Wayland)
         PKGS_NEEDED=()
-        dpkg -l python3-xlib &>/dev/null 2>&1 || PKGS_NEEDED+=("python3-xlib")
-        dpkg -l scrot &>/dev/null 2>&1 || PKGS_NEEDED+=("scrot")
+        dpkg -s python3-xlib &>/dev/null 2>&1 || PKGS_NEEDED+=("python3-xlib")
+        dpkg -s scrot &>/dev/null 2>&1 || PKGS_NEEDED+=("scrot")
 
         if [ ${#PKGS_NEEDED[@]} -gt 0 ]; then
             echo "      Instalando: ${PKGS_NEEDED[*]}"

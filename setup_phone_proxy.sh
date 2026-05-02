@@ -544,7 +544,7 @@ print(len(job_store.list_proxy_nodes()))
     read -r -p "  Etiqueta (ej: Teléfono $NEXT_NUM SIM Telcel): " NODE_LABEL
     read -r -p "  Notas (opcional): " NODE_NOTES
 
-    [ -z "$NODE_ID" ] || [ -z "$NODE_LABEL" ] && { fail "ID y etiqueta son obligatorios"; exit 1; }
+    if [ -z "$NODE_ID" ] || [ -z "$NODE_LABEL" ]; then fail "ID y etiqueta son obligatorios"; exit 1; fi
 
     PROTO=$(echo "$DETECTED_URL" | grep -oP '^[a-z0-9]+(?=://)')
 
@@ -693,7 +693,7 @@ for k, v in fields:
 print()
 accs = [a for a in job_store.list_proxy_assignments() if a['primary_node'] == '$node_id']
 if accs:
-    print(f"  {bold}Cuentas asignadas ({len(accs)}):${reset}")
+    print(f"  {bold}Cuentas asignadas ({len(accs)}):{reset}")
     for a in accs:
         sec = f"  (fallback: {a['secondary_node']})" if a.get('secondary_node') else ''
         print(f"    • {a['account_name']}{sec}")
