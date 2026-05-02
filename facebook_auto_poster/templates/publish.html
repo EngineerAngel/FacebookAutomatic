@@ -253,6 +253,19 @@ select { color-scheme: dark; }
 .status-box.ok { display: block; background: #052e16; border: 1px solid #166534; color: #86efac; }
 .status-box.error { display: block; background: #450a0a; border: 1px solid #991b1b; color: #fca5a5; }
 .status-box.info { display: block; background: #1e1b4b; border: 1px solid #3730a3; color: #a5b4fc; }
+.group-results-detail { margin-top: 0.75rem; display: none; }
+.group-results-detail.visible { display: block; }
+.group-results-section { margin-bottom: 0.5rem; }
+.group-results-section h4 { font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.05em; margin: 0 0 0.3rem; }
+.group-results-section h4.ok  { color: #86efac; }
+.group-results-section h4.err { color: #fca5a5; }
+.group-results-list { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.group-result-item { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.2rem 0.55rem;
+  border-radius: 999px; font-size: 0.75rem; line-height: 1.4; }
+.group-result-item.ok  { background: #052e16; border: 1px solid #166534; color: #86efac; }
+.group-result-item.err { background: #450a0a; border: 1px solid #991b1b; color: #fca5a5; }
+.group-result-item .gr-account { opacity: 0.65; font-size: 0.7rem; }
 
 .hint { font-size: 0.775rem; color: #475569; margin-top: 0.4rem; }
 
@@ -501,6 +514,7 @@ tr:last-child td { border-bottom: none; }
       </div>
 
       <div class="status-box" id="confirm-status"></div>
+      <div id="group-results-detail" class="group-results-detail"></div>
     </div>
   </section>
 
@@ -1156,14 +1170,15 @@ async function pollJobStatus(jobId) {
         } else {
           showStatus('confirm-status', `⚠️ Publicado con errores — ${ok} OK / ${fail} fallido${fail !== 1 ? 's' : ''}`, 'error');
         }
+        renderGroupResults(job.group_results || []);
         await loadScheduled();
-        resetForm();
         return;
       }
 
       if (job.status === 'failed') {
         const reason = (job.errors && job.errors[0]) || 'Error desconocido';
         showStatus('confirm-status', `❌ Falló: ${reason}`, 'error');
+        renderGroupResults(job.group_results || []);
         const btn = document.getElementById('btn-publish');
         if (btn) btn.disabled = false;
         return;
@@ -1185,6 +1200,8 @@ function resetForm() {
   document.getElementById('custom-text').value = '';
   document.getElementById('custom-image').value = '';
   document.querySelectorAll('.template-card').forEach(c => c.classList.remove('selected'));
+  const grd = document.getElementById('group-results-detail');
+  if (grd) { grd.innerHTML = ''; grd.classList.remove('visible'); }
   switchWorkflow('templates');
 }
 
@@ -1236,6 +1253,36 @@ function showStatus(elementId, msg, type) {
   if (!el) return;
   el.textContent = msg;
   el.className = 'status-box ' + type;
+}
+
+function renderGroupResults(groupResults) {
+  const container = document.getElementById('group-results-detail');
+  if (!container || !groupResults || !groupResults.length) return;
+  const ok  = groupResults.filter(g => g.success);
+  const err = groupResults.filter(g => !g.success);
+  let html = '';
+  if (ok.length) {
+    html += '<div class="group-results-section">';
+    html += '<h4 class="ok">Grupos publicados</h4>';
+    html += '<ul class="group-results-list">';
+    ok.forEach(g => {
+      html += `<li class="group-result-item ok">✓ ${escapeHtml(g.group_tag)}`;
+      html += ` <span class="gr-account">${escapeHtml(g.account)}</span></li>`;
+    });
+    html += '</ul></div>';
+  }
+  if (err.length) {
+    html += '<div class="group-results-section">';
+    html += '<h4 class="err">Grupos fallidos</h4>';
+    html += '<ul class="group-results-list">';
+    err.forEach(g => {
+      html += `<li class="group-result-item err">✗ ${escapeHtml(g.group_tag)}`;
+      html += ` <span class="gr-account">${escapeHtml(g.account)}</span></li>`;
+    });
+    html += '</ul></div>';
+  }
+  container.innerHTML = html;
+  container.classList.toggle('visible', html.length > 0);
 }
 
 function closeModal(modalId) {

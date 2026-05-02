@@ -888,25 +888,36 @@ def get_job(job_id: str) -> dict | None:
         if not r:
             return None
         results = conn.execute(
-            "SELECT success, error_msg, account_name FROM job_results WHERE job_id=?",
+            """SELECT success, error_msg, account_name, group_id, group_tag
+               FROM job_results WHERE job_id=? ORDER BY account_name, group_tag""",
             (job_id,),
         ).fetchall()
         succeeded = sum(1 for x in results if x["success"] and x["account_name"] != "__system__")
         failed    = sum(1 for x in results if not x["success"] and x["account_name"] != "__system__")
         errors    = [x["error_msg"] for x in results
                      if x["account_name"] == "__system__" and x["error_msg"]]
+        group_results = [
+            {
+                "account":   x["account_name"],
+                "group_id":  x["group_id"],
+                "group_tag": x["group_tag"],
+                "success":   bool(x["success"]),
+            }
+            for x in results if x["account_name"] != "__system__"
+        ]
         return {
-            "id":          r["id"],
-            "type":        r["type"],
-            "status":      r["status"],
-            "accounts":    json.loads(r["accounts"]) if r["accounts"] else None,
+            "id":            r["id"],
+            "type":          r["type"],
+            "status":        r["status"],
+            "accounts":      json.loads(r["accounts"]) if r["accounts"] else None,
             "scheduled_for": r["scheduled_for"],
-            "created_at":  r["created_at"],
-            "started_at":  r["started_at"],
-            "finished_at": r["finished_at"],
-            "groups_ok":   succeeded,
-            "groups_fail": failed,
-            "errors":      errors,
+            "created_at":    r["created_at"],
+            "started_at":    r["started_at"],
+            "finished_at":   r["finished_at"],
+            "groups_ok":     succeeded,
+            "groups_fail":   failed,
+            "errors":        errors,
+            "group_results": group_results,
         }
 
 
