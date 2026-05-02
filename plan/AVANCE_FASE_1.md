@@ -6,7 +6,7 @@
 
 | # | Ítem | Estado | Completado |
 |---|------|--------|-----------|
-| 1.1 | SIM hotspot pool con resiliencia | ⏳ Pendiente | — |
+| 1.1 | SIM hotspot pool con resiliencia | 🔄 En progreso (otra rama) | — |
 | 1.2 | Password individual cifrada | ✅ Completado | 2026-04-24 |
 | 1.3 | Fingerprint variation (UA + viewport + locale + TZ) | ✅ Completado | 2026-04-23 |
 | 1.4 | Ventana horaria realista + timezone por cuenta | ✅ Completado | 2026-04-23 |
@@ -38,16 +38,11 @@
 
 ---
 
-### ⏳ 1.1 — SIM hotspot pool con resiliencia
+### 🔄 1.1 — SIM hotspot pool con resiliencia
 
-**Prerrequisitos de hardware:** 4-5 teléfonos con tethering USB y app proxy SOCKS5.
+> **En progreso en rama separada.** El trabajo se gestiona allí — no duplicar seguimiento aquí.
 
-**Pendiente:**
-- [ ] Instalar app proxy (Every Proxy) en cada teléfono
-- [ ] Crear tabla `proxy_nodes` y `account_proxy_assignment` en DB
-- [ ] Implementar `proxy_manager.py` (health checker + resolve_proxy)
-- [ ] Integrar proxy en `_build_browser()` de `facebook_poster.py`
-- [ ] Panel admin para gestionar nodos
+**Prerequisitos de hardware:** 4-5 teléfonos con tethering USB y app proxy SOCKS5.
 
 ---
 
@@ -129,6 +124,19 @@
   - Micro-pausa: 2% chance (antes 5%)
 - [x] Validación: CPM ~280 (cercano a rango 150-240)
 - [x] Ratio backspaces: ~1% (dentro de 0.5-3%)
+
+---
+
+## Notas de robustez — mejoras pendientes (baja prioridad)
+
+Observaciones de calidad identificadas post-implementación. No bloquean producción.
+
+| Ítem | Observación | Esfuerzo | Dónde |
+|------|------------|----------|-------|
+| **P2.1** | Default de `timezone` en `AccountConfig` es `"America/Mexico_City"` — debería ser `"UTC"` para neutralidad. Afecta solo cuentas nuevas sin timezone explícito. | 15 min | [config.py:100](../facebook_auto_poster/config.py#L100) |
+| **P2.2** | `active_hours` se parsea sin validar rango: valores como `[25, 30]` o `[23, 7]` no se detectan y causan que la cuenta nunca publique. Añadir validación + fallback a `(7, 23)` con WARNING. | 20 min | [config.py:145](../facebook_auto_poster/config.py#L145) |
+
+Implementar cuando se toque `config.py` por otro motivo — no justifican sesión propia.
 
 ---
 
