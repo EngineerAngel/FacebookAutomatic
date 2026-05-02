@@ -44,6 +44,10 @@ _cooldown_lock = threading.Lock()
 _proxy_cache: dict[str, tuple[dict, float]] = {}
 _PROXY_CACHE_TTL_S = 30
 
+# Backoff de nmcli modify por perfil (evita reintentar cada 120s si polkit lo rechaza)
+_usb_modify_backoff: dict[str, float] = {}
+_USB_MODIFY_RETRY_S = 600  # reintentar en 10 min, no en 2 min
+
 
 # ---------------------------------------------------------------------------
 # Health checking
@@ -79,7 +83,10 @@ def _ensure_usb_never_default() -> None:
     Verifica que todas las interfaces de tethering USB (enx*, usb*, rndis*,
     enu*) tengan never-default=yes en NetworkManager y bloquea DNS por ellas.
     Se ejecuta al arrancar y cada CHECK_INTERVAL_S durante la operacion.
-    Solo loguea si encuentra y corrige un problema.
+    Solo loguea si encuentra o corrige un problema.
+
+    Si nmcli connection modify falla (polkit rechaza), aplica backoff de
+    _USB_MODIFY_RETRY_S para no reintentar en cada ciclo de 120s.
     """
     try:
         out = subprocess.run(
@@ -88,6 +95,8 @@ def _ensure_usb_never_default() -> None:
         ).stdout
     except Exception:
         return
+
+    now = time.time()
 
     for line in out.splitlines():
         parts = line.split()
@@ -123,9 +132,18 @@ def _ensure_usb_never_default() -> None:
             ).stdout.strip()
 
             if nd_out == "yes":
-                continue  # ya esta protegido
+                # Protegido — limpiar backoff si existía de un intento previo fallido
+                _usb_modify_backoff.pop(profile, None)
+                continue
 
-            # Corregir
+            # Verificar backoff: si el último intento falló hace menos de _USB_MODIFY_RETRY_S, omitir
+            last_attempt = _usb_modify_backoff.get(profile, 0.0)
+            if now - last_attempt < _USB_MODIFY_RETRY_S:
+                continue
+
+            _usb_modify_backoff[profile] = now  # registrar intento
+
+            # Intentar corregir
             subprocess.run(
                 ["nmcli", "connection", "modify", profile,
                  "ipv4.never-default", "yes",
@@ -140,8 +158,25 @@ def _ensure_usb_never_default() -> None:
                 ["resolvectl", "domain", iface, "~."],
                 capture_output=True, timeout=5,
             )
-            logger.info(
-                "[ProxyHealth] Ruta USB corregida: %s (%s) → never-default", iface, profile)
+
+            # Verificar si realmente se aplicó
+            nd_after = subprocess.run(
+                ["nmcli", "-t", "-f", "ipv4.never-default",
+                 "connection", "show", profile],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+
+            if nd_after == "yes":
+                _usb_modify_backoff.pop(profile, None)  # éxito — resetear backoff
+                logger.info(
+                    "[ProxyHealth] Ruta USB corregida: %s (%s) → never-default", iface, profile)
+            else:
+                logger.warning(
+                    "[ProxyHealth] nmcli modify falló para %s (%s) — "
+                    "¿polkit sin permiso? Reintentando en %ds. "
+                    "Para resolverlo permanentemente ejecuta: "
+                    "sudo nmcli connection modify '%s' ipv4.never-default yes",
+                    iface, profile, _USB_MODIFY_RETRY_S, profile)
         except Exception:
             pass
 

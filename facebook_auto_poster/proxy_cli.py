@@ -190,7 +190,8 @@ def _nm_profile_get(profile: str, key: str) -> str:
 
 def _ensure_never_default(iface: str) -> bool:
     """Garantiza que la interfaz USB NO tome la ruta por defecto.
-    Crea o modifica el perfil NM y reaplica inmediatamente. Retorna True si se aplico."""
+    Modifica el perfil NM y reaplica inmediatamente. Retorna True si se aplico.
+    Verifica el resultado para detectar fallos silenciosos de polkit."""
     profile = _get_nm_profile(iface)
     if not profile:
         logger.error("No se encontró perfil NM para %s", iface)
@@ -198,12 +199,25 @@ def _ensure_never_default(iface: str) -> bool:
 
     current = _nm_profile_get(profile, "ipv4.never-default")
     if current == "yes":
-        logger.info("NM %s: never-default ya esta yes", profile)
+        logger.info("NM %s: never-default ya está en yes — sin cambios", profile)
     else:
         _run(["nmcli", "connection", "modify", profile,
               "ipv4.never-default", "yes",
               "connection.autoconnect-priority", "-999"])
-        logger.info("NM %s: never-default cambiado a yes", profile)
+
+        # Verificar que el comando realmente surtió efecto
+        after = _nm_profile_get(profile, "ipv4.never-default")
+        if after != "yes":
+            logger.error(
+                "nmcli modify no se aplicó al perfil '%s' — "
+                "posiblemente bloqueado por polkit.\n"
+                "Solución permanente (ejecutar una sola vez con sudo):\n"
+                "  sudo nmcli connection modify '%s' ipv4.never-default yes\n"
+                "  sudo nmcli device reapply %s",
+                profile, profile, iface,
+            )
+            return False
+        logger.info("NM %s: never-default cambiado a yes ✓", profile)
 
     # Bloquear DNS por esta interfaz (evita que systemd-resolved la use)
     _run(["resolvectl", "domain", iface, "~."], timeout=5)
