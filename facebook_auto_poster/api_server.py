@@ -52,7 +52,7 @@ from pathlib import Path
 from flask import (Flask, jsonify, redirect, render_template,
                    request, send_from_directory, session)
 
-from config import CONFIG, load_accounts, apply_group_filter
+from config import CONFIG, load_accounts, apply_group_filter, AccountConfig, pick_fingerprint
 from account_manager_async import AsyncAccountManager
 import job_store
 import proxy_manager
@@ -470,15 +470,43 @@ def shutdown_executor(wait: bool = False) -> None:
 
 
 def _run_discovery(run_id: str, account_name: str) -> None:
-    """Ejecuta el descubrimiento de grupos para una cuenta en un thread."""
+    """Ejecuta el descubrimiento de grupos para una cuenta en un thread.
+
+    Usa list_accounts_full() en lugar de load_accounts() para incluir cuentas
+    sin grupos asignados — exactamente las que necesitan descubrir sus grupos.
+    """
     try:
-        accounts = load_accounts()
-        account = next((a for a in accounts if a.name == account_name), None)
-        if not account:
+        rows = job_store.list_accounts_full()
+        row = next((r for r in rows if r["name"] == account_name), None)
+        if not row:
             job_store.fail_discovery_run(
                 run_id, f"Cuenta '{account_name}' no encontrada"
             )
             return
+
+        global_password = os.getenv("FB_PASSWORD", "").strip()
+        password = global_password
+        if row.get("password_enc"):
+            try:
+                from crypto import decrypt_password
+                password = decrypt_password(row["password_enc"])
+            except Exception:
+                pass
+
+        fp_raw = row.get("fingerprint_json")
+        fingerprint = json.loads(fp_raw) if fp_raw else pick_fingerprint([])
+        active_hours = tuple(json.loads(row.get("active_hours") or "[7, 23]"))
+        groups = json.loads(row.get("groups") or "[]")
+
+        account = AccountConfig(
+            name=row["name"],
+            email=row["email"],
+            password=password,
+            groups=groups,
+            timezone=row.get("timezone") or "America/Mexico_City",
+            active_hours=active_hours,
+            fingerprint=fingerprint,
+        )
 
         logger.info("[%s] Iniciando descubrimiento de grupos (run=%s)", account_name, run_id)
         groups = discover_groups_for_account(account, CONFIG)
@@ -858,9 +886,7 @@ def admin_trigger_discovery(name: str):
     Inicia descubrimiento automático de grupos para una cuenta.
     Retorna {run_id, status: "running"} para polling.
     """
-    # Verificar que la cuenta existe
-    accounts = load_accounts()
-    if not any(a.name == name for a in accounts):
+    if not any(r["name"] == name for r in job_store.list_accounts_full()):
         return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
 
     run_id = uuid.uuid4().hex[:12]
@@ -892,9 +918,7 @@ def admin_discovery_status(run_id: str):
 @admin_required
 def admin_list_discovered_groups(name: str):
     """Lista grupos descubiertos para una cuenta."""
-    # Verificar que la cuenta existe
-    accounts = load_accounts()
-    if not any(a.name == name for a in accounts):
+    if not any(r["name"] == name for r in job_store.list_accounts_full()):
         return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
 
     groups = job_store.list_discovered_groups(name)
