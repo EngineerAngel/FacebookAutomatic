@@ -1,6 +1,6 @@
 # 00 — Contexto del plan de mejora
 
-> **Última actualización:** 2026-05-03 (revisión documentación — proxies marcados completos)
+> **Última actualización:** 2026-05-03 (P2.1/P2.2 implementado; orquestador rediseño async-first; .env.example limpiado)
 
 ## Objetivo global
 
@@ -69,8 +69,10 @@ Los demás riesgos del diagnóstico inicial están resueltos: fingerprints únic
 
 | Documento | Contenido |
 |-----------|-----------|
-| [PENDIENTES.md](PENDIENTES.md) | Tareas concretas sin completar (config fixes, fingerprint verification, group discovery E2E) |
+| [PENDIENTES.md](PENDIENTES.md) | ✅ P2.1/P2.2 completado. Pendientes: fingerprint verification, group discovery E2E (en Linux) |
 | [CONTEXTO_PROXIES_SIGUIENTE_CHAT.md](CONTEXTO_PROXIES_SIGUIENTE_CHAT.md) | ~~Migración pendiente~~ Migración completada (Bloques A-D). Documento histórico. |
+| [ORCHESTRATOR_DESIGN.md](ORCHESTRATOR_DESIGN.md) | **Nuevo (reescrito).** Diseño técnico del orquestador de sesiones — async-first, 6 fases independientes (A→F). |
+| [ORCHESTRATOR_REVIEW.md](ORCHESTRATOR_REVIEW.md) | **Nuevo (reescrito).** Revisión de fallos y rediseños — marca qué está resuelto, qué necesita implementación. |
 | [SCRAPLING_REFERENCE.md](SCRAPLING_REFERENCE.md) | Referencia técnica del sistema de DOM repair (Scrapling + Gemini) — ya implementado |
 | [ANTIDETECCION_COMPORTAMIENTO_HUMANO.md](ANTIDETECCION_COMPORTAMIENTO_HUMANO.md) | Análisis de capas de detección de Facebook y gaps pendientes |
 | [grupos.md](grupos.md) | Script JS para extracción segura de IDs de grupos desde el browser |

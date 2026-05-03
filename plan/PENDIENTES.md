@@ -4,19 +4,19 @@
 
 ---
 
-## ⬅️ PRÓXIMA TAREA — Config fixes en `config.py`
+## ✅ COMPLETADO — Config fixes en `config.py` (P2.1 + P2.2)
 
-> **Prioridad:** Alta. Implementar en la sesión actual.
+> **Prioridad:** Alta. **Status:** ✅ Implementado en commit [`2b6dc22`](https://github.com/EngineerAngel/FacebookAutomatic/commit/2b6dc22).
 
-### P2.1 — Default timezone debería ser `"UTC"`
+### P2.1 — Default timezone es ahora `"UTC"` ✅
 **Archivo:** [config.py:118](../facebook_auto_poster/config.py#L118)  
-El default de `timezone` en `AccountConfig` es `"America/Mexico_City"`. Debería ser `"UTC"` para neutralidad. Solo afecta cuentas nuevas sin timezone explícito.  
-**Esfuerzo:** 15 min
+Cambio completado. Default timezone en `AccountConfig` → `"UTC"` (en lugar de `"America/Mexico_City"`). Fallback en `load_accounts()` también actualizado.  
+**Esfuerzo:** 15 min ✅
 
-### P2.2 — `active_hours` no valida rangos inválidos
-**Archivo:** [config.py:145](../facebook_auto_poster/config.py#L145)  
-Valores como `[25, 30]` o `[23, 7]` no se detectan y causan que la cuenta nunca publique. Añadir validación + fallback a `(7, 23)` con WARNING.  
-**Esfuerzo:** 20 min
+### P2.2 — `active_hours` ahora valida rangos ✅
+**Archivo:** [config.py](../facebook_auto_poster/config.py)  
+Implementado `_validate_active_hours()` helper. Detecta rangos inválidos (start > end, horas fuera [0-23]). Registra WARNING y fallback a `(7, 23)`. Se llama en `__post_init__` de todas las instancias. 5 tests nuevos, todos pasan.  
+**Esfuerzo:** 20 min ✅
 
 ---
 

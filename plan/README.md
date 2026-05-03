@@ -23,6 +23,8 @@ Todas las fases completadas. Ver [00_CONTEXTO.md](00_CONTEXTO.md) para riesgos v
 
 | Documento | Contenido |
 |-----------|-----------|
+| [ORCHESTRATOR_DESIGN.md](ORCHESTRATOR_DESIGN.md) | **Nuevo.** Diseño técnico del orquestador de sesiones — async-first, 6 fases independientes (A→F), integración con worker actual |
+| [ORCHESTRATOR_REVIEW.md](ORCHESTRATOR_REVIEW.md) | **Nuevo.** Revisión de fallos y rediseños — 11 fallos mapeados, estado actual, reglas estrictas |
 | [SCRAPLING_REFERENCE.md](SCRAPLING_REFERENCE.md) | Referencia técnica de Scrapling para DOM repair (3.4) |
 | [ANTIDETECCION_COMPORTAMIENTO_HUMANO.md](ANTIDETECCION_COMPORTAMIENTO_HUMANO.md) | Análisis de capas de detección de Facebook y gaps |
 
