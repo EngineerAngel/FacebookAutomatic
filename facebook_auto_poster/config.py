@@ -10,7 +10,7 @@ import json
 import os
 import random
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -278,3 +278,34 @@ def _load_accounts_from_env(global_password: str) -> list[AccountConfig]:
         )
 
     return accounts
+
+
+# ---------------------------------------------------------------------------
+# Filtro de grupos por publicación
+# ---------------------------------------------------------------------------
+
+def apply_group_filter(
+    accounts: list[AccountConfig],
+    group_ids: dict[str, list[str]] | None,
+) -> list[AccountConfig]:
+    """Restringe los grupos de cada cuenta al subconjunto seleccionado.
+
+    group_ids: {"account_name": ["gid1", "gid2"], ...} o None
+    - None              → sin filtro (backward compat — llamadas sin group_ids)
+    - dict vacío {}     → ninguna cuenta seleccionada, devuelve []
+    - Cuenta ausente    → esa cuenta se omite (no publica)
+    - Lista vacía []    → esa cuenta se omite
+    - Intersección vacía→ esa cuenta se omite (selected no coincide con acc.groups)
+    """
+    if group_ids is None:
+        return accounts
+    result = []
+    for acc in accounts:
+        selected = group_ids.get(acc.name)
+        if not selected:
+            continue
+        allowed = set(acc.groups)
+        filtered = [g for g in selected if g in allowed]
+        if filtered:
+            result.append(_dc_replace(acc, groups=filtered))
+    return result
