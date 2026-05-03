@@ -566,6 +566,13 @@ async function loadAccounts() {
     btnDiscover.textContent = '🔍';
     btnDiscover.onclick = () => triggerDiscovery(acc.name, btnDiscover);
 
+    const btnLogin = document.createElement('button');
+    btnLogin.className = 'btn btn-edit btn-sm';
+    btnLogin.style.marginLeft = '0.4rem';
+    btnLogin.title = 'Iniciar sesión manual (crea/renueva cookie)';
+    btnLogin.textContent = '🔑';
+    btnLogin.onclick = () => triggerLogin(acc.name, btnLogin);
+
     const btnEdit = document.createElement('button');
     btnEdit.className = 'btn btn-edit btn-sm';
     btnEdit.style.marginLeft = '0.4rem';
@@ -579,6 +586,7 @@ async function loadAccounts() {
     btnDel.onclick = () => deleteAccount(acc.name);
 
     tdAcc.appendChild(btnDiscover);
+    tdAcc.appendChild(btnLogin);
     tdAcc.appendChild(btnEdit);
     tdAcc.appendChild(btnDel);
 
@@ -1252,8 +1260,37 @@ async function rejectRepair(id) {
 tabButtons.forEach(btn => {
   btn.addEventListener('click', function() {
     if (this.getAttribute('data-tab') === 'maintenance') loadRepairs();
+    if (this.getAttribute('data-tab') === 'templates')   loadTemplates();
   });
 });
+
+// ─── Login manual ─────────────────────────────────────────────────────────
+async function triggerLogin(accountName, btn) {
+  btn.disabled = true;
+  btn.textContent = '⏳';
+  const { ok, data } = await api('POST', `/admin/api/accounts/${accountName}/login`);
+  if (!ok) {
+    toast(`No se pudo iniciar login: ${data.error || 'Error'}`, true);
+    btn.disabled = false; btn.textContent = '🔑'; return;
+  }
+  pollLogin(data.run_id, accountName, btn);
+}
+
+function pollLogin(runId, accountName, btn) {
+  const iv = setInterval(async () => {
+    const { ok, data } = await api('GET', `/admin/api/accounts/${accountName}/login/${runId}`);
+    if (!ok || data.status === 'error') {
+      clearInterval(iv);
+      toast(`❌ Login fallido (${accountName}): ${data.message || 'Error'}`, true);
+      btn.disabled = false; btn.textContent = '🔑';
+    } else if (data.status === 'done') {
+      clearInterval(iv);
+      toast(`✅ Sesión iniciada: ${accountName}. Cookie guardada.`);
+      btn.disabled = false; btn.textContent = '🔑';
+      loadAccounts();
+    }
+  }, 3000);
+}
 
 // ─── Init ─────────────────────────────────────────────────────────────────
 loadAccounts();
