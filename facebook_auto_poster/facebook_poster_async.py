@@ -409,8 +409,13 @@ class FacebookPosterAsync:
         except Exception:
             self.logger.warning("Failed to save screenshot %s", path, exc_info=True)
 
-    async def _attach_image(self, image_path: str) -> bool:
-        abs_path = os.path.abspath(image_path)
+    async def _attach_image(self, image_paths: list[str]) -> bool:
+        """Adjunta 1–N imágenes al compositor. Playwright acepta lista de paths
+        en set_files/set_input_files, lo que activa el carrusel multi-foto de FB."""
+        if not image_paths:
+            return False
+        abs_paths = [os.path.abspath(p) for p in image_paths]
+        self.logger.info("[Image] Subiendo %d archivo(s)", len(abs_paths))
 
         photo_btn_loc = self.page.locator(
             "//div[@role='dialog']//div["
@@ -426,8 +431,8 @@ class FacebookPosterAsync:
             async with self.page.expect_file_chooser(timeout=5000) as fc_info:
                 await self._human_click(photo_btn_loc)
             fc = fc_info.value
-            await fc.set_files(abs_path)
-            self.logger.info("[Image] Archivo enviado via FileChooser (sin diálogo OS)")
+            await fc.set_files(abs_paths)
+            self.logger.info("[Image] %d archivo(s) enviados via FileChooser", len(abs_paths))
             file_sent = True
         except Exception:
             self.logger.debug("[Image] FileChooser no interceptado — usando set_input_files")
@@ -437,17 +442,18 @@ class FacebookPosterAsync:
                 file_input = self.page.locator(
                     "//div[@role='dialog']//input[@type='file']"
                 ).first
-                await file_input.set_input_files(abs_path, timeout=15000)
-                self.logger.info("[Image] Archivo enviado via set_input_files (dialog)")
+                await file_input.set_input_files(abs_paths, timeout=15000)
+                self.logger.info("[Image] %d archivo(s) enviados via set_input_files (dialog)", len(abs_paths))
                 file_sent = True
             except Exception:
                 pass
 
         if not file_sent:
-            await self.page.set_input_files("//input[@type='file']", abs_path, timeout=15000)
-            self.logger.info("[Image] Archivo enviado via set_input_files (global)")
+            await self.page.set_input_files("//input[@type='file']", abs_paths, timeout=15000)
+            self.logger.info("[Image] %d archivo(s) enviados via set_input_files (global)", len(abs_paths))
 
-        self.logger.info("[Image] Ruta: %s", abs_path)
+        for p in abs_paths:
+            self.logger.info("[Image] Ruta: %s", p)
 
         try:
             await self.page.locator(
@@ -900,8 +906,8 @@ class FacebookPosterAsync:
     # ------------------------------------------------------------------ #
     # Publish
     # ------------------------------------------------------------------ #
-    async def publish(self, group_id: str, text: str, image_path: str | None = None) -> bool:
-        """Post *text* (y opcionalmente imagen) to a single group. Returns True on success."""
+    async def publish(self, group_id: str, text: str, image_paths: list[str] | None = None) -> bool:
+        """Post *text* (y opcionalmente imágenes) to a single group. Returns True on success."""
         _t0 = time.monotonic()
 
         for attempt in range(1, self.config["max_retries"] + 1):
@@ -984,8 +990,8 @@ class FacebookPosterAsync:
                 else:
                     await self.human_wait(1, 2)
 
-                if image_path:
-                    img_ok = await self._attach_image(image_path)
+                if image_paths:
+                    img_ok = await self._attach_image(image_paths)
                     if not img_ok:
                         health = await self._check_page_health("after_image")
                         if health != "ok":
@@ -1059,7 +1065,11 @@ class FacebookPosterAsync:
     # ------------------------------------------------------------------ #
     # Publish to all groups
     # ------------------------------------------------------------------ #
-    async def publish_to_all_groups(self, text: str, image_path: str | None = None) -> dict[str, bool]:
+    async def publish_to_all_groups(self, text: str, image_paths: list[str] | str | None = None) -> dict[str, bool]:
+        # Backward compat: acepta string legacy (una sola imagen)
+        if isinstance(image_paths, str):
+            image_paths = [image_paths] if image_paths else None
+
         results: dict[str, bool] = {}
         variation_mode = self.config.get("text_variation_mode", "off")
 
@@ -1097,7 +1107,7 @@ class FacebookPosterAsync:
                 variation_mode, self.account.name, group_id, len(text), len(group_text),
             )
 
-            success = await self.publish(group_id, group_text, image_path=image_path)
+            success = await self.publish(group_id, group_text, image_paths=image_paths)
             results[group_id] = success
 
             if idx < len(groups) - 1:

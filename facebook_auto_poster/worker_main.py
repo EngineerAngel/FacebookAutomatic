@@ -84,7 +84,7 @@ async def _poll_loop(executor: ThreadPoolExecutor) -> None:
                 job["id"],
                 accounts,
                 job["text"],
-                job.get("image_path"),
+                job.get("image_paths") or [],
                 job.get("callback_url"),
             )
         else:

@@ -40,9 +40,9 @@ def _run_scheduled_job(job: dict) -> None:
     """Ejecuta un job agendado: mismo pipeline que POST /post."""
     job_id = job["id"]
     text = job["text"]
-    # Puente hasta Bloque 4: usar primera imagen de la lista (o legacy str)
-    image_paths = job.get("image_paths") or []
-    image_path = image_paths[0] if image_paths else job.get("image_path")
+    image_paths: list[str] = job.get("image_paths") or []
+    if not image_paths and job.get("image_path"):
+        image_paths = [job["image_path"]]  # backward compat: job legacy con string
     group_ids = job.get("group_ids")
     callback_url = job.get("callback_url")
     account_filter = job.get("accounts")
@@ -73,7 +73,7 @@ def _run_scheduled_job(job: dict) -> None:
     try:
         mgr = AsyncAccountManager(
             accounts, CONFIG, text,
-            image_path=image_path, callback_url=callback_url,
+            image_paths=image_paths or None, callback_url=callback_url,
         )
         results = asyncio.run(mgr.run())
         AsyncAccountManager.print_summary(results)

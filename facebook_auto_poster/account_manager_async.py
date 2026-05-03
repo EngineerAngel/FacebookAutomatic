@@ -5,7 +5,7 @@ Replaces AccountManager's multiprocessing backend with asyncio.Semaphore.
 Feature flag: CONFIG["use_async_poster"] (default False).
 
 Usage:
-    mgr = AsyncAccountManager(accounts, config, text, image_path=image_path)
+    mgr = AsyncAccountManager(accounts, config, text, image_paths=image_paths)
     results = await mgr.run()
 """
 
@@ -30,13 +30,13 @@ class AsyncAccountManager:
         accounts: list[AccountConfig],
         config: dict,
         text: str,
-        image_path: Optional[str] = None,
+        image_paths: Optional[list[str]] = None,
         callback_url: Optional[str] = None,
     ) -> None:
         self.accounts = accounts
         self.config = config
         self.text = text
-        self.image_path = image_path
+        self.image_paths = image_paths
         self.callback_url = callback_url
 
     # ------------------------------------------------------------------ #
@@ -54,7 +54,7 @@ class AsyncAccountManager:
                         summary[account.name] = {}
                         continue
 
-                    results = await poster.publish_to_all_groups(self.text, image_path=self.image_path)
+                    results = await poster.publish_to_all_groups(self.text, image_paths=self.image_paths)
                     summary[account.name] = results
 
                 except Exception:
@@ -91,7 +91,7 @@ class AsyncAccountManager:
                             results[account.name] = {}
                             return
                         account_results = await poster.publish_to_all_groups(
-                            self.text, image_path=self.image_path
+                            self.text, image_paths=self.image_paths
                         )
                         results[account.name] = account_results
                     except Exception:

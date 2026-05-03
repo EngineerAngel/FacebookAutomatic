@@ -79,7 +79,7 @@ def run_job(
     job_id: str,
     accounts,
     text: str,
-    image_path: str | None,
+    image_paths: list[str] | None,
     callback_url: str | None,
 ) -> None:
     """Ejecuta un job completo: locks → rate-limit → AsyncAccountManager → webhook."""
@@ -107,7 +107,7 @@ def run_job(
 
         mgr = AsyncAccountManager(
             runnable, CONFIG, text,
-            image_path=image_path, callback_url=callback_url,
+            image_paths=image_paths, callback_url=callback_url,
         )
         results = asyncio.run(mgr.run())
         AsyncAccountManager.print_summary(results)

@@ -456,8 +456,7 @@ def _enqueue_job(job_id: str, accounts, text: str,
     """
     if CONFIG.get("split_processes"):
         return  # job ya en DB con status='pending'; worker_main lo recoge
-    first_image = image_paths[0] if image_paths else None
-    _executor.submit(worker_core.run_job, job_id, accounts, text, first_image, callback_url)
+    _executor.submit(worker_core.run_job, job_id, accounts, text, image_paths, callback_url)
 
 
 def shutdown_executor(wait: bool = False) -> None:
