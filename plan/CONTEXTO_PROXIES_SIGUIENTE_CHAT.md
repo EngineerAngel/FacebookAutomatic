@@ -1,8 +1,11 @@
-# Contexto: Migración de proxies `produccion_temp → fase-3`
+# ~~Contexto: Migración de proxies `produccion_temp → fase-3`~~ — COMPLETADA
+
+> **Estado:** ✅ Todos los bloques (A-D) commiteados en `fase-3` (2026-05-03).  
+> Este documento es histórico — describe lo que se hizo, no lo que queda pendiente.
 
 **Rama de trabajo:** `fase-3`  
 **Fecha del documento:** 2026-05-03  
-**Propósito:** Continuar en otro chat la migración pendiente de archivos de proxy.
+**Commits de la migración:** `a3a7186` (setup.sh), `7ae026c` (setup_tunnel.sh), `29860ef` (setup_phone_proxy.sh), `9f2aed1` (proxy_cli.py), `980b2c5` (job_store LRU), `5938d43` (proxy_manager LRU)
 
 ---
 

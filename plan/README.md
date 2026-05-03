@@ -42,4 +42,4 @@ Todas las fases completadas. Ver [00_CONTEXTO.md](00_CONTEXTO.md) para riesgos v
 
 | Documento | Propósito |
 |-----------|-----------|
-| [CONTEXTO_PROXIES_SIGUIENTE_CHAT.md](CONTEXTO_PROXIES_SIGUIENTE_CHAT.md) | Migración pendiente de archivos proxy `produccion_temp → fase-3` |
+| [CONTEXTO_PROXIES_SIGUIENTE_CHAT.md](CONTEXTO_PROXIES_SIGUIENTE_CHAT.md) | Histórico: migración proxy `produccion_temp → fase-3` (✅ completada) |

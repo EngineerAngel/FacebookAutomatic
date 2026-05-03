@@ -4,10 +4,12 @@
 
 ---
 
-## Config — mejoras menores (Fase 1, post-implementación)
+## ⬅️ PRÓXIMA TAREA — Config fixes en `config.py`
+
+> **Prioridad:** Alta. Implementar en la sesión actual.
 
 ### P2.1 — Default timezone debería ser `"UTC"`
-**Archivo:** [config.py:100](../facebook_auto_poster/config.py#L100)  
+**Archivo:** [config.py:118](../facebook_auto_poster/config.py#L118)  
 El default de `timezone` en `AccountConfig` es `"America/Mexico_City"`. Debería ser `"UTC"` para neutralidad. Solo afecta cuentas nuevas sin timezone explícito.  
 **Esfuerzo:** 15 min
 
@@ -15,8 +17,6 @@ El default de `timezone` en `AccountConfig` es `"America/Mexico_City"`. Debería
 **Archivo:** [config.py:145](../facebook_auto_poster/config.py#L145)  
 Valores como `[25, 30]` o `[23, 7]` no se detectan y causan que la cuenta nunca publique. Añadir validación + fallback a `(7, 23)` con WARNING.  
 **Esfuerzo:** 20 min
-
-> Implementar cuando se toque `config.py` por otro motivo — no justifican sesión propia.
 
 ---
 

@@ -1,6 +1,6 @@
 # 00 — Contexto del plan de mejora
 
-> **Última actualización:** 2026-05-03
+> **Última actualización:** 2026-05-03 (revisión documentación — proxies marcados completos)
 
 ## Objetivo global
 
@@ -35,7 +35,7 @@ Elevar el proyecto **Facebook Auto-Poster** a un estado donde:
 
 | Severidad | Riesgo | Estado |
 |-----------|--------|--------|
-| 🔴 Crítico | Sin proxy por cuenta — cluster-ban risk | 🔄 En progreso — rama `produccion_temp`. Ver [CONTEXTO_PROXIES_SIGUIENTE_CHAT.md](CONTEXTO_PROXIES_SIGUIENTE_CHAT.md) |
+| ✅ Resuelto | Sin proxy por cuenta — cluster-ban risk | ✅ Completo (commits `5938d43`, `980b2c5`, `9f2aed1`). `resolve_proxy()` con asignación dinámica LRU, `MAX_ACCOUNTS_PER_NODE=10`, cooldown entre rotaciones. |
 | 🟡 Medio | Cookies de sesión en texto plano en SQLite | ⏳ Planificado post-Fase 3 |
 
 Los demás riesgos del diagnóstico inicial están resueltos: fingerprints únicos (1.3), passwords cifradas (1.2), ventana horaria por timezone (1.4), typo rate realista (1.5), Waitress en producción (Fase 2), rate limiter SQLite-backed (Fase 2), migración async (3.1).
@@ -70,7 +70,7 @@ Los demás riesgos del diagnóstico inicial están resueltos: fingerprints únic
 | Documento | Contenido |
 |-----------|-----------|
 | [PENDIENTES.md](PENDIENTES.md) | Tareas concretas sin completar (config fixes, fingerprint verification, group discovery E2E) |
-| [CONTEXTO_PROXIES_SIGUIENTE_CHAT.md](CONTEXTO_PROXIES_SIGUIENTE_CHAT.md) | Migración pendiente de archivos proxy `produccion_temp → fase-3` |
+| [CONTEXTO_PROXIES_SIGUIENTE_CHAT.md](CONTEXTO_PROXIES_SIGUIENTE_CHAT.md) | ~~Migración pendiente~~ Migración completada (Bloques A-D). Documento histórico. |
 | [SCRAPLING_REFERENCE.md](SCRAPLING_REFERENCE.md) | Referencia técnica del sistema de DOM repair (Scrapling + Gemini) — ya implementado |
 | [ANTIDETECCION_COMPORTAMIENTO_HUMANO.md](ANTIDETECCION_COMPORTAMIENTO_HUMANO.md) | Análisis de capas de detección de Facebook y gaps pendientes |
 | [grupos.md](grupos.md) | Script JS para extracción segura de IDs de grupos desde el browser |
