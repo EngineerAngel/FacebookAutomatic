@@ -528,6 +528,47 @@ class FacebookPosterAsync:
         except Exception:
             self.logger.debug("[Publish] Sin previsualización de link — continuando")
 
+    async def _handle_buy_sell_form(self) -> bool:
+        """Detecta si se abrió un formulario de venta (grupos buy/sell) y cambia
+        a la pestaña 'Publicación' para poder publicar texto normal.
+
+        Retorna True si se detectó y resolvió el formulario de venta.
+        """
+        sell_indicators = [
+            "//div[@role='dialog']//*[text()='Elige el tipo']",
+            "//div[@role='dialog']//*[text()='Choose listing type']",
+            "//div[@role='dialog']//*[text()='Precio']",
+            "//div[@role='dialog']//*[text()='Price']",
+            "//div[@role='dialog']//*[text()='Condición']",
+            "//div[@role='dialog']//*[text()='Condition']",
+        ]
+        for xpath in sell_indicators:
+            try:
+                el = self.page.locator(xpath).first
+                await el.wait_for(state="visible", timeout=1500)
+                self.logger.info("[Publish] Formulario de venta detectado — buscando pestaña 'Publicación'")
+                break
+            except Exception:
+                continue
+        else:
+            return False
+
+        post_tab_selectors = [
+            "//div[@role='dialog']//span[text()='Publicación']",
+            "//div[@role='dialog']//span[text()='Post']",
+            "//div[@role='dialog']//div[@role='tab'][.//span[text()='Publicación']]",
+            "//div[@role='dialog']//div[@role='tab'][.//span[text()='Post']]",
+        ]
+        try:
+            tab = await self._find_first(post_tab_selectors, timeout=5)
+            await self._human_click(tab)
+            await self.human_wait(1, 2)
+            self.logger.info("[Publish] Cambiado a pestaña 'Publicación' desde formulario de venta")
+            return True
+        except Exception:
+            self.logger.warning("[Publish] Formulario de venta — no se encontró pestaña 'Publicación'")
+            return False
+
     def _save_cookies(self) -> None:
         cookies = self.context.cookies()
         job_store.save_cookies(self.account.email, cookies)
@@ -966,6 +1007,7 @@ class FacebookPosterAsync:
                     ], timeout=15)
                 await self._human_click(composer)
                 await self.human_wait(2, 4)
+                await self._handle_buy_sell_form()
 
                 self.logger.info("[Publish] Esperando modal de publicacion...")
                 modal = await self._find_first([
