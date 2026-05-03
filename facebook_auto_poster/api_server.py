@@ -870,7 +870,7 @@ def admin_set_account_password(name: str):
     try:
         encrypted = _encrypt_password(plain)
     except Exception as exc:
-        logger.error("Error cifrando password para '%s': %s", name, exc)
+        logger.exception("Error cifrando password para '%s'", name)
         return jsonify({"error": "Error interno al cifrar la contraseña"}), 500
 
     if not job_store.set_account_password(name, encrypted):

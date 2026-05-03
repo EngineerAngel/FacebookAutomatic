@@ -243,7 +243,7 @@ tr:last-child td { border-bottom: none; }
 
     <div class="field">
       <label class="field-label" for="text">Texto</label>
-      <textarea id="text" placeholder="Escribe el texto de la publicación aquí…"></textarea>
+      <textarea id="text" placeholder="Escribe el texto de la publicación aquí…" maxlength="63206"></textarea>
       <div id="char-count">0 caracteres</div>
     </div>
 
@@ -384,14 +384,20 @@ async function loadAnuncio() {
 let _imageFiles = [];           // File objects elegidos por el usuario
 let _templateImagePaths = [];   // paths del servidor cuando se usa una plantilla
 
+const _MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+
 function handleImageChange() {
   const input = document.getElementById('image-input');
   for (const f of input.files) {
+    if (f.size > _MAX_FILE_BYTES) {
+      showStatus(`"${f.name}" supera el límite de 10 MB`, 'error');
+      continue;
+    }
     const key = `${f.name}|${f.size}|${f.lastModified}`;
     if (_imageFiles.length < 5 && !_imageFiles.some(x => `${x.name}|${x.size}|${x.lastModified}` === key))
       _imageFiles.push(f);
   }
-  _templateImagePaths = [];  // limpiar paths de plantilla si el usuario elige archivos
+  _templateImagePaths = [];
   input.value = '';
   renderImagePreviews();
 }
