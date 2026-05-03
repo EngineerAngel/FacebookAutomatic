@@ -116,16 +116,17 @@ def handle_post(body: PostRequest):
             detail=f"Todas las cuentas excedieron su rate limit ({len(skipped)} saltadas)",
         )
 
+    image_paths_v2 = [image_path] if image_path else []
     job_id = job_store.create_job(
         text=body.text,
         accounts=body.accounts,
-        image_path=image_path,
+        image_paths=image_paths_v2,
         callback_url=body.callback_url,
         job_type="immediate",
     )
 
     logger.info("Job %s aceptado (v2) | cuentas=%s", job_id, [a.name for a in runnable])
-    _enqueue_job(job_id, runnable, body.text, image_path, body.callback_url)
+    _enqueue_job(job_id, runnable, body.text, image_paths_v2, body.callback_url)
 
     return PostAccepted(
         job_id=job_id,
@@ -169,7 +170,7 @@ def create_schedule(body: ScheduleRequest):
     job_id = job_store.create_job(
         text=body.text,
         accounts=body.accounts,
-        image_path=image_path,
+        image_paths=[image_path] if image_path else [],
         callback_url=body.callback_url,
         job_type="scheduled",
         scheduled_for=body.scheduled_for,

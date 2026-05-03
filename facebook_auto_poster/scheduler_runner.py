@@ -12,7 +12,7 @@ import threading
 import time
 from datetime import datetime
 
-from config import CONFIG, load_accounts
+from config import CONFIG, load_accounts, apply_group_filter
 import job_store
 import webhook
 from account_manager_async import AsyncAccountManager
@@ -40,7 +40,10 @@ def _run_scheduled_job(job: dict) -> None:
     """Ejecuta un job agendado: mismo pipeline que POST /post."""
     job_id = job["id"]
     text = job["text"]
-    image_path = job.get("image_path")
+    # Puente hasta Bloque 4: usar primera imagen de la lista (o legacy str)
+    image_paths = job.get("image_paths") or []
+    image_path = image_paths[0] if image_paths else job.get("image_path")
+    group_ids = job.get("group_ids")
     callback_url = job.get("callback_url")
     account_filter = job.get("accounts")
 
@@ -54,6 +57,8 @@ def _run_scheduled_job(job: dict) -> None:
 
     if account_filter:
         accounts = [a for a in accounts if a.name in account_filter]
+
+    accounts = apply_group_filter(accounts, group_ids)
 
     if not accounts:
         msg = "Sin cuentas válidas para este job"

@@ -22,7 +22,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from config import CONFIG, load_accounts
+from config import CONFIG, load_accounts, apply_group_filter
 from logging_config import setup_logging
 import job_store
 import scheduler_runner
@@ -71,6 +71,7 @@ async def _poll_loop(executor: ThreadPoolExecutor) -> None:
                 [a for a in all_accounts if a.name in account_filter]
                 if account_filter else all_accounts
             )
+            accounts = apply_group_filter(accounts, job.get("group_ids"))
             if not accounts:
                 msg = "Sin cuentas válidas para este job"
                 logger.warning("Job %s: %s", job["id"], msg)

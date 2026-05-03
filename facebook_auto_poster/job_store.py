@@ -563,29 +563,37 @@ def list_group_tags() -> list[dict]:
 def create_job(
     text: str,
     accounts: list[str] | None,
-    image_path: str | None,
-    callback_url: str | None,
+    image_path: str | None = None,
+    callback_url: str | None = None,
     job_type: str = "immediate",
     scheduled_for: datetime | None = None,
+    image_paths: list[str] | None = None,
+    group_ids: dict[str, list[str]] | None = None,
 ) -> str:
-    """Inserta un nuevo job y retorna su id."""
+    """Inserta un nuevo job y retorna su id.
+
+    image_paths tiene prioridad sobre image_path (legacy). Ambos son opcionales.
+    """
     job_id = uuid.uuid4().hex[:12]
+    # image_paths tiene prioridad; image_path (legacy) se envuelve en lista si se pasa solo
+    actual_paths = image_paths if image_paths is not None else ([image_path] if image_path else None)
     with _connect() as conn:
         conn.execute(
             """INSERT INTO jobs
                (id, text, accounts, image_path, callback_url,
-                type, scheduled_for, status, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?)""",
+                type, scheduled_for, status, created_at, group_ids)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
                 job_id,
                 text,
                 json.dumps(accounts) if accounts else None,
-                image_path,
+                _encode_image_paths(actual_paths),
                 callback_url,
                 job_type,
                 scheduled_for.isoformat() if scheduled_for else None,
                 "pending",
                 datetime.now().isoformat(),
+                json.dumps(group_ids) if group_ids else None,
             ),
         )
     return job_id
@@ -682,7 +690,7 @@ def claim_pending_job() -> dict | None:
     now = datetime.now().isoformat()
     with _connect() as conn:
         row = conn.execute(
-            "SELECT id, text, accounts, image_path, callback_url "
+            "SELECT id, text, accounts, image_path, callback_url, group_ids "
             "FROM jobs WHERE type='immediate' AND status='pending' "
             "ORDER BY created_at ASC LIMIT 1"
         ).fetchone()
@@ -696,7 +704,17 @@ def claim_pending_job() -> dict | None:
         if updated == 0:
             return None  # race condition — otro proceso se adelantó
         conn.commit()
-        return dict(row)
+        paths = _decode_image_paths(row["image_path"])
+        raw_gids = row["group_ids"]
+        return {
+            "id":         row["id"],
+            "text":       row["text"],
+            "accounts":   row["accounts"],   # JSON string — worker_main lo parsea
+            "image_path":  paths[0] if paths else None,   # backward compat
+            "image_paths": paths,
+            "callback_url": row["callback_url"],
+            "group_ids":  json.loads(raw_gids) if raw_gids else None,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -847,7 +865,7 @@ def pop_due_scheduled(now: datetime) -> list[dict]:
     """
     with _connect() as conn:
         rows = conn.execute(
-            """SELECT id, text, accounts, image_path, callback_url, scheduled_for
+            """SELECT id, text, accounts, image_path, callback_url, scheduled_for, group_ids
                FROM jobs
                WHERE type='scheduled' AND status='pending'
                  AND scheduled_for <= ?""",
@@ -861,13 +879,17 @@ def pop_due_scheduled(now: datetime) -> list[dict]:
                 (now.isoformat(), row["id"]),
             )
             accounts = json.loads(row["accounts"]) if row["accounts"] else None
+            paths = _decode_image_paths(row["image_path"])
+            raw_gids = row["group_ids"]
             due.append({
-                "id": row["id"],
-                "text": row["text"],
-                "accounts": accounts,
-                "image_path": row["image_path"],
+                "id":          row["id"],
+                "text":        row["text"],
+                "accounts":    accounts,
+                "image_path":  paths[0] if paths else None,   # backward compat
+                "image_paths": paths,
                 "callback_url": row["callback_url"],
                 "scheduled_for": row["scheduled_for"],
+                "group_ids":   json.loads(raw_gids) if raw_gids else None,
             })
         return due
 
@@ -952,22 +974,26 @@ def list_pending_scheduled() -> list[dict]:
     """Lista jobs agendados aún pendientes (para GET /schedule)."""
     with _connect() as conn:
         rows = conn.execute(
-            """SELECT id, text, accounts, image_path, callback_url, scheduled_for, created_at
+            """SELECT id, text, accounts, image_path, callback_url, scheduled_for, created_at, group_ids
                FROM jobs WHERE type='scheduled' AND status='pending'
                ORDER BY scheduled_for ASC""",
         ).fetchall()
-        return [
-            {
-                "id": r["id"],
-                "text": r["text"],
-                "accounts": json.loads(r["accounts"]) if r["accounts"] else None,
-                "image_path": r["image_path"],
+        result = []
+        for r in rows:
+            paths = _decode_image_paths(r["image_path"])
+            raw_gids = r["group_ids"]
+            result.append({
+                "id":           r["id"],
+                "text":         r["text"],
+                "accounts":     json.loads(r["accounts"]) if r["accounts"] else None,
+                "image_path":   paths[0] if paths else None,   # backward compat
+                "image_paths":  paths,
                 "callback_url": r["callback_url"],
                 "scheduled_for": r["scheduled_for"],
-                "created_at": r["created_at"],
-            }
-            for r in rows
-        ]
+                "created_at":   r["created_at"],
+                "group_ids":    json.loads(raw_gids) if raw_gids else None,
+            })
+        return result
 
 
 # ---------------------------------------------------------------------------

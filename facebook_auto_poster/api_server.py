@@ -44,7 +44,7 @@ from pathlib import Path
 from flask import (Flask, jsonify, redirect, render_template,
                    request, send_from_directory, session)
 
-from config import CONFIG, load_accounts
+from config import CONFIG, load_accounts, apply_group_filter
 from account_manager_async import AsyncAccountManager
 import job_store
 import proxy_manager
@@ -354,36 +354,59 @@ def _extract_payload() -> tuple[dict | None, tuple[dict, int] | None]:
         accounts = [a.strip() for a in raw_accounts.split(",") if a.strip()] or None
         scheduled_for = (request.form.get("scheduled_for") or "").strip() or None
         callback_url = (request.form.get("callback_url") or "").strip() or None
+        group_ids = None
 
-        image_path: str | None = None
-        file = request.files.get("image")
-        if file and file.filename:
-            image_path, err = _validate_image_upload(file)
+        # Múltiples archivos bajo el campo 'image' (o uno solo, backward compat)
+        files = [f for f in request.files.getlist("image") if f and f.filename]
+        if len(files) > _MAX_IMAGES:
+            return None, ({"error": f"Máximo {_MAX_IMAGES} imágenes por publicación"}, 400)
+        image_paths: list[str] = []
+        for f in files:
+            path, err = _validate_image_upload(f)
             if err:
                 return None, ({"error": err}, 400)
+            image_paths.append(path)  # type: ignore[arg-type]
+
+        # Permitir reusar imágenes ya subidas vía campo 'image_paths' JSON
+        if not image_paths:
+            raw_paths_field = request.form.get("image_paths")
+            if raw_paths_field:
+                try:
+                    parsed = json.loads(raw_paths_field)
+                except (ValueError, TypeError):
+                    return None, ({"error": "image_paths debe ser JSON válido"}, 400)
+                reused, err = _safe_image_paths(parsed)
+                if err:
+                    return None, ({"error": err}, 400)
+                image_paths = reused or []
     else:
         data = request.get_json(silent=True) or {}
         text = (data.get("text") or "").strip()
-        raw_image = data.get("image_path") or None
-        image_path = None
-        if raw_image:
-            image_path = _safe_image_path(str(raw_image))
-            if image_path is None:
-                return None, ({"error": "image_path inválido o fuera del directorio permitido"}, 400)
         raw_accounts = data.get("accounts")
         accounts = raw_accounts if isinstance(raw_accounts, list) and raw_accounts else None
         scheduled_for = data.get("scheduled_for") or None
         callback_url = data.get("callback_url") or None
 
+        # Acepta image_paths (lista) o image_path (legacy string)
+        raw_paths = data.get("image_paths") or data.get("image_path") or None
+        image_paths, err = _safe_image_paths(raw_paths)
+        if err:
+            return None, ({"error": err}, 400)
+
+        # Filtro de grupos por publicación: {"account_name": ["gid1", "gid2"]}
+        raw_gids = data.get("group_ids")
+        group_ids = raw_gids if isinstance(raw_gids, dict) else None
+
     if not text:
         return None, ({"error": "Campo 'text' es obligatorio"}, 400)
 
     return {
-        "text": text,
-        "image_path": image_path,
-        "accounts": accounts,
+        "text":          text,
+        "image_paths":   image_paths,
+        "accounts":      accounts,
         "scheduled_for": scheduled_for,
-        "callback_url": callback_url,
+        "callback_url":  callback_url,
+        "group_ids":     group_ids,
     }, None
 
 
@@ -408,11 +431,16 @@ _filter_rate_limited_accounts = worker_core.filter_rate_limited_accounts
 
 
 def _enqueue_job(job_id: str, accounts, text: str,
-                 image_path: str | None, callback_url: str | None) -> None:
-    """Envía un job al pool (monoproceso) o es no-op en modo biproceso."""
+                 image_paths: list[str], callback_url: str | None) -> None:
+    """Envía un job al pool (monoproceso) o es no-op en modo biproceso.
+
+    image_paths: lista de rutas validadas. Se pasa la primera al worker como
+    puente hasta que Bloque 4 adapte facebook_poster_async a multi-imagen.
+    """
     if CONFIG.get("split_processes"):
         return  # job ya en DB con status='pending'; worker_main lo recoge
-    _executor.submit(worker_core.run_job, job_id, accounts, text, image_path, callback_url)
+    first_image = image_paths[0] if image_paths else None
+    _executor.submit(worker_core.run_job, job_id, accounts, text, first_image, callback_url)
 
 
 def shutdown_executor(wait: bool = False) -> None:
@@ -531,19 +559,22 @@ def handle_post():
     if err:
         return jsonify(err[0]), err[1]
 
+    filtered = apply_group_filter(accounts, payload["group_ids"])
+
     job_id = job_store.create_job(
         text=payload["text"],
         accounts=payload["accounts"],
-        image_path=payload["image_path"],
+        image_paths=payload["image_paths"],
         callback_url=payload["callback_url"],
         job_type="immediate",
+        group_ids=payload["group_ids"],
     )
 
     logger.info("Job %s aceptado | cuentas=%s", job_id,
-                [a.name for a in accounts])
+                [a.name for a in filtered])
 
-    _enqueue_job(job_id, accounts, payload["text"],
-                 payload["image_path"], payload["callback_url"])
+    _enqueue_job(job_id, filtered, payload["text"],
+                 payload["image_paths"], payload["callback_url"])
 
     return jsonify({
         "status": "accepted",
@@ -583,10 +614,11 @@ def create_schedule():
     job_id = job_store.create_job(
         text=payload["text"],
         accounts=payload["accounts"],
-        image_path=payload["image_path"],
+        image_paths=payload["image_paths"],
         callback_url=payload["callback_url"],
         job_type="scheduled",
         scheduled_for=when,
+        group_ids=payload["group_ids"],
     )
 
     logger.info("Job %s agendado para %s", job_id, when.isoformat())
@@ -1139,18 +1171,21 @@ def admin_post():
     if err:
         return jsonify(err[0]), err[1]
 
+    filtered = apply_group_filter(accounts, payload["group_ids"])
+
     job_id = job_store.create_job(
         text=payload["text"],
         accounts=payload["accounts"],
-        image_path=payload["image_path"],
+        image_paths=payload["image_paths"],
         callback_url=None,
         job_type="immediate",
+        group_ids=payload["group_ids"],
     )
 
     logger.info("Job %s aceptado via admin | cuentas=%s", job_id,
-                [a.name for a in accounts])
+                [a.name for a in filtered])
 
-    _enqueue_job(job_id, accounts, payload["text"], payload["image_path"], None)
+    _enqueue_job(job_id, filtered, payload["text"], payload["image_paths"], None)
 
     return jsonify({
         "status": "accepted",
@@ -1191,10 +1226,11 @@ def admin_create_schedule():
     job_id = job_store.create_job(
         text=payload["text"],
         accounts=payload["accounts"],
-        image_path=payload["image_path"],
+        image_paths=payload["image_paths"],
         callback_url=None,
         job_type="scheduled",
         scheduled_for=when,
+        group_ids=payload["group_ids"],
     )
 
     logger.info("Job %s agendado para %s via admin", job_id, when.isoformat())
