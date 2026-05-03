@@ -12,7 +12,9 @@
       "Bash(python -m pytest facebook_auto_poster/tests/unit/ -v --tb=short)",
       "WebFetch(domain:api.github.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(curl -s https://raw.githubusercontent.com/D4Vinci/Scrapling/main/pyproject.toml)"
+      "Bash(curl -s https://raw.githubusercontent.com/D4Vinci/Scrapling/main/pyproject.toml)",
+      "Bash(git ls-tree *)",
+      "Bash(grep \"\\\\.sh$\")"
     ]
   }
 }
