@@ -185,6 +185,35 @@ tr:last-child td { border-bottom: none; }
 .empty-msg { text-align: center; color: #475569; padding: 1.75rem 0; font-size: 0.875rem; }
 
 .hint { font-size: 0.775rem; color: #475569; margin-top: 0.4rem; }
+
+/* ─── Multi-image previews ─── */
+#image-previews { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.img-preview-item { position: relative; width: 88px; height: 88px; }
+.img-preview-item img { width: 100%; height: 100%; object-fit: cover; border-radius: 4px; border: 1px solid #2d3148; }
+.img-preview-rm {
+  position: absolute; top: 2px; right: 2px;
+  background: rgba(0,0,0,.65); color: #fff; border: none;
+  border-radius: 50%; width: 20px; height: 20px; cursor: pointer;
+  font-size: 12px; line-height: 20px; text-align: center; padding: 0;
+}
+.img-preview-idx {
+  position: absolute; bottom: 2px; left: 2px;
+  background: rgba(0,0,0,.55); color: #fff; font-size: 10px;
+  padding: 1px 4px; border-radius: 2px;
+}
+
+/* ─── Template selector ─── */
+.template-selector { margin-bottom: 1rem; }
+#template-selector-panel {
+  margin-top: 0.5rem; padding: 0.75rem;
+  background: #1a1d27; border: 1px solid #2d3148; border-radius: 6px;
+}
+#template-select {
+  width: 100%; background: #0f1117; border: 1px solid #2d3148;
+  border-radius: 6px; color: #e2e8f0; padding: 0.5rem 0.75rem;
+  font-size: 0.9rem; font-family: inherit;
+}
+#template-select:focus { outline: none; border-color: #7c8cf8; }
 </style>
 </head>
 <body>
@@ -215,14 +244,16 @@ tr:last-child td { border-bottom: none; }
     </div>
 
     <div class="field">
-      <label class="field-label">Imagen (opcional)</label>
+      <label class="field-label">Imágenes (opcional, máx 5)</label>
       <div class="file-row">
-        <label class="file-label-btn" for="image-input">Seleccionar archivo</label>
-        <input type="file" id="image-input" accept=".jpg,.jpeg,.png,.gif,.webp">
-        <span id="file-name">Ningún archivo seleccionado</span>
-        <button class="btn btn-secondary btn-sm" id="remove-img-btn" style="display:none" onclick="removeImage()">✕ Quitar</button>
+        <label class="file-label-btn" for="image-input">Seleccionar imágenes</label>
+        <input type="file" id="image-input" multiple accept=".jpg,.jpeg,.png,.gif,.webp"
+               onchange="handleImageChange()">
+        <button class="btn btn-secondary btn-sm" id="remove-img-btn" style="display:none"
+                onclick="clearImages()">✕ Quitar todas</button>
       </div>
-      <p class="hint">Formatos: jpg, jpeg, png, gif, webp · Máximo recomendado: 10 MB</p>
+      <div id="image-previews"></div>
+      <p class="hint">Formatos: jpg, jpeg, png, gif, webp · Máximo 5 imágenes</p>
     </div>
 
     <div class="field">
@@ -290,12 +321,7 @@ window.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  document.getElementById('image-input').addEventListener('change', function () {
-    if (this.files[0]) {
-      document.getElementById('file-name').textContent = this.files[0].name;
-      document.getElementById('remove-img-btn').style.display = 'inline-flex';
-    }
-  });
+  // image-input handled by handleImageChange()
 });
 
 // ── Accounts ────────────────────────────────────────────────────────────────
@@ -342,11 +368,58 @@ async function loadAnuncio() {
   }
 }
 
-// ── Remove image ─────────────────────────────────────────────────────────────
-function removeImage() {
+// ── Multi-imagen ──────────────────────────────────────────────────────────────
+let _imageFiles = [];           // File objects elegidos por el usuario
+let _templateImagePaths = [];   // paths del servidor cuando se usa una plantilla
+
+function handleImageChange() {
+  const input = document.getElementById('image-input');
+  for (const f of input.files) {
+    const key = `${f.name}|${f.size}|${f.lastModified}`;
+    if (_imageFiles.length < 5 && !_imageFiles.some(x => `${x.name}|${x.size}|${x.lastModified}` === key))
+      _imageFiles.push(f);
+  }
+  _templateImagePaths = [];  // limpiar paths de plantilla si el usuario elige archivos
+  input.value = '';
+  renderImagePreviews();
+}
+
+function removeImage(idx) {
+  _imageFiles.splice(idx, 1);
+  renderImagePreviews();
+}
+
+function clearImages() {
+  _imageFiles = [];
+  _templateImagePaths = [];
   document.getElementById('image-input').value = '';
-  document.getElementById('file-name').textContent = 'Ningún archivo seleccionado';
-  document.getElementById('remove-img-btn').style.display = 'none';
+  renderImagePreviews();
+}
+
+function renderImagePreviews() {
+  const container = document.getElementById('image-previews');
+  const rmBtn = document.getElementById('remove-img-btn');
+
+  // Mostrar previews de archivos locales
+  const localItems = _imageFiles.map((f, i) => ({
+    src: URL.createObjectURL(f), idx: i, total: _imageFiles.length,
+  }));
+  // Mostrar thumbnails de paths de plantilla (imágenes ya en servidor)
+  const pathItems = _templateImagePaths.map((p, i) => ({
+    src: `/admin/uploaded-images/${p.split(/[\\/]/).pop()}`,
+    idx: i, total: _templateImagePaths.length, isPath: true,
+  }));
+
+  const items = localItems.length ? localItems : pathItems;
+  container.innerHTML = items.map(it =>
+    `<div class="img-preview-item">
+       <img src="${it.src}" alt="">
+       <span class="img-preview-idx">${it.idx + 1}/${it.total}</span>
+       ${!it.isPath ? `<button class="img-preview-rm" onclick="removeImage(${it.idx})">×</button>` : ''}
+     </div>`
+  ).join('');
+
+  rmBtn.style.display = items.length ? 'inline-flex' : 'none';
 }
 
 // ── Publish ──────────────────────────────────────────────────────────────────
@@ -372,8 +445,11 @@ async function publish() {
   if (!allChecked && selected.length > 0) fd.append('accounts', selected.join(','));
   if (scheduledFor) fd.append('scheduled_for', scheduledFor);
 
-  const imageFile = document.getElementById('image-input').files[0];
-  if (imageFile) fd.append('image', imageFile);
+  if (_imageFiles.length > 0) {
+    _imageFiles.forEach(f => fd.append('image', f));
+  } else if (_templateImagePaths.length > 0) {
+    fd.append('image_paths', JSON.stringify(_templateImagePaths));
+  }
 
   const btn = document.getElementById('publish-btn');
   btn.disabled = true;
@@ -383,7 +459,7 @@ async function publish() {
   const endpoint = whenVal === 'scheduled' ? '/admin/api/schedule' : '/admin/api/post';
 
   try {
-    const res  = await fetch(endpoint, { method: 'POST', body: fd });
+    const res  = await fetch(endpoint, { method: 'POST', body: fd, credentials: 'same-origin' });
     const data = await res.json();
 
     if (res.ok) {
