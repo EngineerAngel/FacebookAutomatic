@@ -144,6 +144,15 @@ UPLOAD_DIR = Path(__file__).resolve().parent / "uploaded_images"
 # Extensiones de imagen permitidas
 _ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
+# Límite de imágenes por publicación / por subida
+_MAX_IMAGES = 5
+
+# Validación de plantillas
+MAX_TEMPLATE_NAME_CHARS = 100
+MIN_TEMPLATE_TEXT_CHARS = 10
+MAX_TEMPLATE_TEXT_CHARS = 50_000
+_TEMPLATE_ID_PATTERN    = re.compile(r"^[a-f0-9]{12}$")
+
 # ---------------------------------------------------------------------------
 # Rate limiter — persistente en SQLite (sobrevive a reinicios)
 # ---------------------------------------------------------------------------
@@ -202,8 +211,10 @@ def admin_required(f):
 # ---------------------------------------------------------------------------
 # Validaciones de input admin
 # ---------------------------------------------------------------------------
-_NAME_RE  = re.compile(r"^[a-z0-9_]{1,30}$")
-_PHONE_RE = re.compile(r"^\+?[0-9]{7,15}$")
+_NAME_RE         = re.compile(r"^[a-z0-9_]{1,30}$")
+_PHONE_RE        = re.compile(r"^\+?[0-9]{7,15}$")
+_GROUP_NUMERIC   = re.compile(r"^\d{8,20}$")           # ID numérico Facebook
+_GROUP_SLUG      = re.compile(r"^[a-zA-Z][a-zA-Z0-9._/-]{2,99}$")  # slug alfanumérico
 
 
 def _validate_login_id(login_id: str) -> str | None:
@@ -226,6 +237,15 @@ def _validate_login_id(login_id: str) -> str | None:
                 "o número de teléfono (ej: +521234567890)"
             )
     return None
+
+
+def _is_valid_group_id(g: str) -> bool:
+    """Acepta IDs numéricos (8-20 dígitos) y slugs alfanuméricos de Facebook.
+    Rechaza: todos-mismo-dígito (ej: 5555555555), menos de 3 chars."""
+    g = str(g).strip()
+    if _GROUP_NUMERIC.match(g):
+        return len(set(g)) > 1          # rechaza 5555555555555, 0000000000
+    return bool(_GROUP_SLUG.match(g))
 
 
 def _validate_account_input(name: str, email: str, groups: list) -> str | None:
@@ -268,6 +288,32 @@ def _safe_image_path(path: str) -> str | None:
         return str(resolved)
     except Exception:
         return None
+
+
+def _safe_image_paths(value) -> tuple[list[str] | None, str | None]:
+    """Normaliza y valida una entrada de paths (modo JSON). Acepta:
+      - list[str] (preferido, multi-imagen)
+      - str       (legacy, single)
+    Retorna (lista_validada, None) en éxito, o (None, error_msg) si falla.
+    None o '' → ([], None). Cada path pasa por _safe_image_path().
+    """
+    if value is None or value == "":
+        return [], None
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, (list, tuple)):
+        candidates = [str(v) for v in value if v]
+    else:
+        return None, "Formato inválido para image_paths"
+    if len(candidates) > _MAX_IMAGES:
+        return None, f"Máximo {_MAX_IMAGES} imágenes por publicación"
+    out: list[str] = []
+    for raw in candidates:
+        safe = _safe_image_path(raw)
+        if safe is None:
+            return None, "image_path inválido o fuera del directorio permitido"
+        out.append(safe)
+    return out, None
 
 
 def _validate_image_upload(file) -> tuple[str | None, str | None]:
