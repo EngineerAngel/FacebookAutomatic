@@ -1,6 +1,6 @@
 # 00 — Contexto del plan de mejora
 
-> **Última actualización:** 2026-05-01
+> **Última actualización:** 2026-05-03
 
 ## Objetivo global
 
@@ -18,10 +18,14 @@ Elevar el proyecto **Facebook Auto-Poster** a un estado donde:
 | Browser automation | Patchright 1.58+ (async) | ✅ Async migrado (Fase 3.1) |
 | Mouse/teclado OS | Emunium 3.0+ via `asyncio.to_thread` | ✅ Funcional |
 | Comentarios humanos | Google Gemini `gemini-2.5-flash` | ✅ Funcional |
-| API | Flask 3+ + Waitress 3.0 | ✅ Producción — FastAPI en `/v2` pendiente (3.2) |
+| API principal | Flask 3+ (puerto `/`) + FastAPI en `/v2` | ✅ Ambos activos — FastAPI con `USE_FASTAPI=1` (Fase 3.2) |
+| Validación de entrada | Pydantic v2 en `/v2/*` endpoints | ✅ Activo (Fase 3.2) |
 | DB | SQLite WAL, `busy_timeout=5s`, sin lock Python | ✅ Limpio (Fase 3.5) |
 | Concurrencia | `asyncio` + `asyncio.Semaphore` | ✅ Async-only (Fase 3.1) |
 | Logs | texto (default) o structlog JSON (`STRUCTURED_LOGGING=1`) | ✅ Dual-mode (Fase 3.3a) |
+| Métricas | Prometheus `/metrics` + Grafana (Docker opcional) | ✅ Activo con `METRICS_ENABLED=1` (Fase 3.3b) |
+| DOM repair | Scrapling (adaptativo) + Gemini (fallback) + aprobación admin | ✅ Activo con `ADAPTIVE_SELECTORS=1` (Fase 3.4) |
+| Procesos | API (`api_main.py`) y Worker (`worker_main.py`) separables | ✅ Separados (Fase 3.7) |
 | Túnel | Cloudflared | ✅ OK |
 | Python | 3.12 | ✅ OK |
 
@@ -31,7 +35,7 @@ Elevar el proyecto **Facebook Auto-Poster** a un estado donde:
 
 | Severidad | Riesgo | Estado |
 |-----------|--------|--------|
-| 🔴 Crítico | Sin proxy por cuenta — cluster-ban risk | 🔄 En progreso (otra rama) |
+| 🔴 Crítico | Sin proxy por cuenta — cluster-ban risk | 🔄 En progreso — rama `produccion_temp`. Ver [CONTEXTO_PROXIES_SIGUIENTE_CHAT.md](CONTEXTO_PROXIES_SIGUIENTE_CHAT.md) |
 | 🟡 Medio | Cookies de sesión en texto plano en SQLite | ⏳ Planificado post-Fase 3 |
 
 Los demás riesgos del diagnóstico inicial están resueltos: fingerprints únicos (1.3), passwords cifradas (1.2), ventana horaria por timezone (1.4), typo rate realista (1.5), Waitress en producción (Fase 2), rate limiter SQLite-backed (Fase 2), migración async (3.1).
@@ -47,7 +51,7 @@ Los demás riesgos del diagnóstico inicial están resueltos: fingerprints únic
 ✅ **Completada.** Persistencia completa de identidad, variación de texto real vía Gemini, concurrencia controlada, Waitress, dependencias pinadas, rate limiter SQLite. Incluye Fase 2.10 (auto-descubrimiento de grupos).
 
 ### Fase 3 — Refactor arquitectónico
-🔄 **En progreso.** Async migration ✅, structlog ✅, SQLite WAL ✅. Pendiente: FastAPI (3.2), Prometheus (3.3b), DOM repair con Scrapling+Gemini (3.4).
+✅ **Completada (2026-05-01).** Async-only (3.1), FastAPI `/v2` (3.2), structlog (3.3a), Prometheus+Grafana (3.3b), DOM repair Scrapling+Gemini (3.4), SQLite WAL (3.5), API/Worker separados (3.7). Ítem 3.6 (spike mouse library) descartado — Emunium funciona en producción.
 
 ---
 
@@ -61,19 +65,15 @@ Los demás riesgos del diagnóstico inicial están resueltos: fingerprints únic
 
 ---
 
-## Documentos activos del plan
+## Documentos del plan
 
 | Documento | Contenido |
 |-----------|-----------|
-| [AVANCE_FASE_1.md](AVANCE_FASE_1.md) | Estado Fase 1 — 5/6 completos, 1.1 en otra rama |
-| [AVANCE_FASE_2.md](AVANCE_FASE_2.md) | Estado Fase 2 — 9/9 completos |
-| [AVANCE_FASE_2_10.md](AVANCE_FASE_2_10.md) | Auto-descubrimiento de grupos — completo |
-| [AVANCE_FASE_3.md](AVANCE_FASE_3.md) | Estado Fase 3 — tracking activo |
-| [03_FASE_3.md](03_FASE_3.md) | Especificación técnica de Fase 3 |
-| [DECISION_3.2_FASTAPI.md](DECISION_3.2_FASTAPI.md) | Decisión de orden de implementación: 3.2 → 3.3b → 3.4 |
-| [SCRAPLING_REFERENCE.md](SCRAPLING_REFERENCE.md) | Referencia técnica de Scrapling para implementar en 3.4 |
-| [ANTIDETECCION_COMPORTAMIENTO_HUMANO.md](ANTIDETECCION_COMPORTAMIENTO_HUMANO.md) | Análisis de capas de detección de Facebook |
-| [grupos.md](grupos.md) | Script JS para extracción segura de grupos |
+| [PENDIENTES.md](PENDIENTES.md) | Tareas concretas sin completar (config fixes, fingerprint verification, group discovery E2E) |
+| [CONTEXTO_PROXIES_SIGUIENTE_CHAT.md](CONTEXTO_PROXIES_SIGUIENTE_CHAT.md) | Migración pendiente de archivos proxy `produccion_temp → fase-3` |
+| [SCRAPLING_REFERENCE.md](SCRAPLING_REFERENCE.md) | Referencia técnica del sistema de DOM repair (Scrapling + Gemini) — ya implementado |
+| [ANTIDETECCION_COMPORTAMIENTO_HUMANO.md](ANTIDETECCION_COMPORTAMIENTO_HUMANO.md) | Análisis de capas de detección de Facebook y gaps pendientes |
+| [grupos.md](grupos.md) | Script JS para extracción segura de IDs de grupos desde el browser |
 
 ---
 

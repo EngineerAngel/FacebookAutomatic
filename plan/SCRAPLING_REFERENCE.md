@@ -1,8 +1,8 @@
 # Scrapling — Referencia técnica e implementación en 3.4
 
 > **Creado:** 2026-05-01  
-> **Estado:** 📋 Referencia — para usar al implementar Ítem 3.4  
-> **Propósito:** Documentar el análisis de Scrapling y servir de guía completa para la sesión de implementación de 3.4. No requiere conocer el repo externo — todo lo necesario está aquí.
+> **Estado:** ✅ Implementado — Ítem 3.4 completado (2026-05-01)  
+> **Propósito:** Referencia técnica de cómo funciona el sistema de DOM repair en producción. Útil para debugging, extensión del sistema, o entender decisiones de diseño.
 
 ---
 
@@ -215,32 +215,30 @@ async def _write_post(self, text: str):
 
 ---
 
-## 4. Plan de implementación para Ítem 3.4
+## 4. Archivos implementados (Ítem 3.4 — completado 2026-05-01)
 
-### 4.1 Archivos nuevos
+### 4.1 Archivos creados
 
 | Archivo | Descripción |
 |---------|-------------|
 | `facebook_auto_poster/adaptive_selector.py` | Módulo `AdaptivePlaywrightBridge` (genérico) |
-| `tests/unit/test_adaptive_selector.py` | Tests unitarios del bridge (con mock de page y doc) |
-| `tests/dom_snapshots/composer_open.html` | HTML sanitizado del composer abierto |
-| `tests/dom_snapshots/feed_group.html` | HTML sanitizado del feed del grupo |
+| `facebook_auto_poster/selector_repair.py` | `SelectorRepairService` — llama Gemini, parsea candidatos JSON, escribe a DB |
+| `tests/unit/test_adaptive_selector.py` | 11 tests unitarios del bridge — todos pasan |
+| `tests/dom_snapshots/README.md` | Instrucciones para capturar y sanitizar snapshots |
 | `scripts/scrub_snapshot.py` | Sanitizador de snapshots (elimina tokens/IDs personales) |
 
 ### 4.2 Archivos modificados
 
 | Archivo | Cambio |
 |---------|--------|
-| `facebook_auto_poster/facebook_poster_async.py` | Integrar `AdaptivePlaywrightBridge` en los métodos de interacción DOM |
-| `facebook_auto_poster/requirements.txt` | Añadir `scrapling` (ver sección 7 para versión exacta) |
+| `facebook_auto_poster/job_store.py` | Tabla `selector_repairs` + 5 funciones CRUD |
+| `facebook_auto_poster/facebook_poster_async.py` | 6 selectores críticos envueltos con `AdaptivePlaywrightBridge` |
+| `facebook_auto_poster/api_server.py` | Endpoints `/admin/api/selector-repairs` (list/approve/reject) |
+| `facebook_auto_poster/templates/admin.html` | Tab "Mantenimiento" con tabla de repairs pendientes |
+| `facebook_auto_poster/config.py` | Flag `adaptive_selectors_enabled` |
+| `facebook_auto_poster/requirements.txt` | `scrapling>=0.3,<1.0` (sin `[fetchers]`) |
 
-### 4.3 Criterios de cierre de 3.4 relacionados con Scrapling
-
-- [ ] `adaptive_selector.py` tiene tests unitarios con ≥80% coverage.
-- [ ] La primera ejecución de `_open_composer()` guarda fingerprints en `.scrapling.db`.
-- [ ] Simulando un cambio de selector (renombrando la clase en el snapshot), `adaptive=True` recupera el elemento correcto.
-- [ ] El módulo no importa nada de `facebook_auto_poster` — es 100% genérico.
-- [ ] `requirements.txt` actualizado y `pip install -r requirements.txt` funciona sin conflictos.
+**Activación:** `ADAPTIVE_SELECTORS=1` en `.env` (default OFF — sin la flag, zero overhead).
 
 ---
 

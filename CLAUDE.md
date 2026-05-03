@@ -19,13 +19,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `job_store.py` | SQLite schema, all DB operations (WAL mode, no threading.Lock) |
 | `facebook_poster_async.py` | Async Patchright login + publish (one instance per account) |
 | `account_manager_async.py` | Async orchestration: `asyncio.Semaphore` for parallel account handling |
-| `api_server.py` | Flask REST API + admin panel |
+| `api_server.py` | Flask REST API + admin panel (all routes) |
+| `worker_core.py` | Shared job execution logic: account locks, rate-limit filter, AsyncAccountManager, webhook |
+| `api_main.py` | Entry point API-only (when `SPLIT_PROCESSES=1` — no scheduler/workers) |
+| `worker_main.py` | Entry point Worker-only: orphan recovery, job polling, Chrome pool, graceful shutdown |
+| `main.py` | Entry point monolítico (API + scheduler, default) |
 | `scheduler_runner.py` | Daemon that polls for scheduled jobs every 30s |
-| `main.py` | Entry point (API + scheduler) |
 | `logging_config.py` | Central logging setup — text mode or structured JSON (structlog) |
+| `crypto.py` | Fernet password encryption/decryption — master key auto-generated in `.secret.key` |
+| `proxy_manager.py` | SIM hotspot proxy pool — health checker daemon + `resolve_proxy()` + LRU assignment |
+| `metrics.py` | Prometheus metrics export (`METRICS_ENABLED=1`) — counters, histograms, gauges |
+| `adaptive_selector.py` | `AdaptivePlaywrightBridge` — 3-level selector recovery: DB approved → Scrapling → Gemini |
+| `selector_repair.py` | Gemini fallback for broken selectors — captures HTML, suggests XPath candidates, stores as pending |
+| `group_discoverer.py` | Autonomous Facebook group discovery via DOM scraping (no API calls) |
+| `text_variation.py` | Gemini paraphrase with SQLite cache + TTL — preserves URLs, numbers, emojis |
 | `gemini_commenter.py` | Gemini API integration (human-like comments during warmup) |
 | `human_browsing.py` | Async feed warmup before posting (`HumanBrowsingAsync`) |
 | `webhook.py` | Async callbacks to OpenClaw |
+| `setup_accounts.py` | First-run utility: opens browser for manual CAPTCHA + saves cookies |
 | `v2_app.py` | FastAPI wrapper (optional, when `USE_FASTAPI=1`) |
 | `v2_router.py` | FastAPI endpoints `/v2/*` (same contract as Flask endpoints) |
 | `v2_models.py` | Pydantic models for request/response validation |
@@ -106,6 +117,15 @@ get_formatter()           # returns the active formatter — used by per-account
 | `login_events` | Login audit trail |
 | `gemini_usage` | Daily Gemini API quota tracking per account |
 | `group_tags` | Human-readable emoji-safe labels per group ID |
+| `account_bans` | Ban cooldown tracking per account (48h cooldown, auto-deactivation) |
+| `rate_limit_events` | SQLite-backed rate limiter (survives restarts) — replaces in-memory dict |
+| `text_variations` | Gemini paraphrase cache with TTL — keyed by (account, group, text_hash) |
+| `discovery_runs` | Audit log of group discovery attempts (status: running/done/failed) |
+| `discovered_groups` | Catalog of groups found via discovery — `added_to_posting` flag for admin approval |
+| `proxy_nodes` | SIM hotspot nodes: IP, port, protocol, status, last health check |
+| `account_proxy_assignment` | Account ↔ proxy node mapping with LRU `last_used_at` |
+| `selector_repairs` | Gemini-suggested XPath candidates (status: pending/approved/rejected) |
+| `templates` | Reusable post templates (title, text, image) managed via admin panel |
 
 ### Login Identifiers (Email or Phone)
 
@@ -144,6 +164,11 @@ Los IDs de grupos de Facebook son **opcionales** al crear/editar una cuenta:
 
 ## API Endpoints
 
+### Public (no auth)
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Basic health check |
+
 ### OpenClaw (X-API-Key required)
 | Method | Path | Description |
 |--------|------|-------------|
@@ -152,17 +177,51 @@ Los IDs de grupos de Facebook son **opcionales** al crear/editar una cuenta:
 | POST | `/schedule` | Schedule publication (ISO 8601 `scheduled_for`) |
 | GET | `/schedule` | List pending scheduled jobs |
 | DELETE | `/schedule/<id>` | Cancel scheduled job |
+| PUT | `/groups/<id>/tag` | Set group tag |
+| GET | `/health/detailed` | Health + worker/DB/scheduler status |
+| GET | `/metrics` | Prometheus metrics (`METRICS_ENABLED=1`) |
 
 ### Admin (session cookie required)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET/POST | `/admin/login` | Login with ADMIN_KEY |
+| GET | `/admin/logout` | Logout |
 | GET | `/admin` | Admin SPA |
 | GET | `/admin/publish` | Publishing interface |
-| CRUD | `/admin/api/accounts[/<name>]` | Account management |
-| PUT | `/admin/api/groups/<id>/tag` | Set group tag |
+| GET/POST/PUT/DELETE | `/admin/api/accounts[/<name>]` | Account CRUD |
+| POST | `/admin/api/accounts/<name>/password` | Set/clear custom password |
+| POST | `/admin/api/accounts/<name>/login` | Trigger manual login |
+| GET | `/admin/api/accounts/<name>/login/<run_id>` | Poll manual login status |
+| POST | `/admin/api/accounts/<name>/proxy` | Assign proxy to account |
+| DELETE | `/admin/api/accounts/<name>/proxy` | Remove proxy assignment |
+| POST | `/admin/api/accounts/<name>/discover-groups` | Trigger group discovery |
+| GET | `/admin/api/discovery/<run_id>` | Poll discovery status |
+| GET | `/admin/api/accounts/<name>/discovered-groups` | List discovered groups |
+| POST | `/admin/api/accounts/<name>/discovered-groups/<id>/add` | Approve + add group |
+| GET/PUT | `/admin/api/groups[/<id>/tag]` | List groups / set tag |
 | GET | `/admin/api/history` | Login events |
 | GET | `/admin/api/jobs` | Recent jobs |
+| GET | `/admin/api/queue` | Live queue status (jobs_by_status, accounts_in_progress) |
+| GET | `/admin/api/bans` | Active ban cooldowns |
+| POST | `/admin/api/bans/<name>/clear` | Clear ban for account |
+| GET | `/admin/api/selector-repairs` | List pending DOM repair candidates |
+| POST | `/admin/api/selector-repairs/<id>/approve` | Approve selector repair |
+| POST | `/admin/api/selector-repairs/<id>/reject` | Reject selector repair |
+| GET/POST | `/admin/api/proxies[/<node_id>]` | List / add proxy nodes |
+| DELETE | `/admin/api/proxies/<node_id>` | Remove proxy node |
+| PUT | `/admin/api/proxies/<node_id>/status` | Enable/disable proxy node |
+| GET/POST/PUT/DELETE | `/admin/api/templates[/<id>]` | Template CRUD |
+| POST | `/admin/api/upload-images` | Upload images for publishing |
+| POST/GET/DELETE | `/admin/api/schedule[/<id>]` | Schedule jobs from admin panel |
+
+### FastAPI `/v2` (X-API-Key required, same contract as Flask)
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/v2/accounts` | List active accounts |
+| POST | `/v2/post` | Immediate publication (Pydantic validated) |
+| POST | `/v2/schedule` | Schedule publication |
+| GET | `/v2/schedule` | List pending scheduled jobs |
+| DELETE | `/v2/schedule/{id}` | Cancel scheduled job |
 
 ## Configuration (config.py `CONFIG` dict)
 
@@ -211,37 +270,37 @@ sqlite3 facebook_auto_poster/jobs.db "SELECT id, status FROM jobs ORDER BY creat
 - Screenshots on failures: `screenshots/{account}/`
 - Bad cookies: just delete the account's cookie row in DB — next login will re-authenticate
 
-## Known Issues
+**Git branch naming:** `fase3.X-nombre` — git no permite `fase-3/3.X` cuando `fase-3` ya existe como rama (punto como separador, no slash).
 
-| Severity | Issue | Plan item |
-|----------|-------|-----------|
-| 🔴 Critical | All accounts share same IP — cluster-ban risk | 1.1 (proxy pool, needs hardware) |
-| 🔴 Critical | Session cookies stored unencrypted in SQLite | 2.8 (Fernet encryption) |
-| 🟡 Medium | Single `FB_PASSWORD` for all accounts | 1.2 (individual encrypted passwords) |
-| 🟡 Medium | Flask dev server in production (no WSGI) | 2.4 (`waitress`) — replaced by `uvicorn` + FastAPI in Fase 3.2 |
-| 🟡 Medium | Dependencies unpinned (`>=` only, no lock file) | 2.5 (`pip freeze`) |
-| 🟢 Low | Rate limiter in-memory (resets on restart) | 2.6 (SQLite-backed) |
-| 🟢 Low | Async poster + threading (not officially thread-safe) | ✅ 3.1 complete (async-only, no sync version) |
+**Tests ≠ validación de producción:** los tests cubren lógica interna (horarios, CRUD, concurrencia). No cubren que Facebook acepta la publicación hoy, que los XPaths funcionan, ni que el anti-detección pasa los filtros actuales. Después de cualquier cambio grande, hacer una publicación de prueba manual con cuenta real antes de escalar.
 
-## Improvement Plan
+**Escala de proxies:** activar proxy por cuenta (`proxy_manager.py`) **antes de escalar a más de 3 cuentas**. Sin IP por cuenta, Facebook puede correlacionar el cluster y banear todo de golpe.
 
-Three phases tracked in `plan/` directory:
+## Known Issues & Plan
 
-| Phase | Status | Focus |
-|-------|--------|-------|
-| **Fase 1** (stop-the-bleeding) | 3/6 complete | Identity isolation per account |
-| **Fase 2** (hardening) | complete | Production stability |
-| **Fase 3** (refactor) | 5/7 complete | Async + FastAPI + observability |
+See [plan/00_CONTEXTO.md](plan/00_CONTEXTO.md) for active risks, phase status, and improvement tracking.
 
-**Fase 1 completed:** 1.3 (fingerprints), 1.4 (timezone/active hours), 1.5 (typo rate)
-**Fase 3 completed:** 
-- Paso 0 (pytest + 67 tests) ✅
-- 3.1 (async-only architecture, eliminated sync version) ✅
-- 3.2 (FastAPI /v2 endpoints + Pydantic validation) ✅
-- 3.3a (structlog JSON logging) ✅
-- 3.5 (SQLite WAL / no global lock) ✅
+Active critical risks: no per-account proxy (cluster-ban), session cookies unencrypted in SQLite.
 
-See `plan/AVANCE_FASE_*.md` for detailed task tracking.
+## Session Rules
+
+### Reglas estrictas (NO negociables)
+
+1. **Solo implementar lo pedido explícitamente** — si se encuentra algo "mejorable" fuera del alcance, reportarlo como nota al final, no implementarlo.
+2. **Antes de crear un archivo nuevo**, confirmar que no existe ya uno similar.
+3. **Antes de modificar un archivo existente**, leer su contenido completo.
+4. **No refactorizar** código que no esté en el alcance de la tarea.
+5. **No agregar** imports, dependencias o funciones auxiliares no solicitadas.
+6. **Si una tarea requiere tocar más archivos de los esperados**, pausar y reportar antes de continuar.
+7. **Ser crítico con el código de otras ramas** — no asumir que es correcto.
+
+### Filosofía de cambio
+
+1. **Mapear el impacto** antes de tocar código o documentación — identificar todos los consumidores del código; leer el código real antes de documentarlo (nunca documentar de memoria o inferencia).
+2. **Cambiar de adentro hacia afuera** — primero DB/modelo, luego backend, luego UI.
+3. **Un cambio por commit** — cada bloque en su propio commit. Facilita `git revert` quirúrgico.
+4. **Verificar el contrato de API antes y después** — anotar qué devuelve cada función actualmente y qué se espera.
+5. **Probar el flujo completo** — si se cambia una función, verificar que los otros consumidores no se rompieron.
 
 ## For Next Session
 

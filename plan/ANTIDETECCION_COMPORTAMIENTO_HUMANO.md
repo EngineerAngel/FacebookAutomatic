@@ -139,15 +139,15 @@ El shadow ban es un **algoritmo de scoring de contenido y cuenta (L4+L5)**, no d
 | # | Mejora | Penalización que mitiga | Archivo objetivo | Estimado |
 |---|---|---|---|---|
 | 1 | Tiempo de lectura proporcional al contenido | Restricción temporal | `human_browsing.py` | 30 min |
-| 2 | Movimiento idle del mouse entre acciones | Restricción temporal + inhabilitación | `facebook_poster.py` | 1 h |
+| 2 | Movimiento idle del mouse entre acciones | Restricción temporal + inhabilitación | `facebook_poster_async.py` | 1 h |
 | 3 | Scroll variable (wheel events vs smooth) | Restricción temporal | `human_browsing.py` | 45 min |
-| 4 | Comportamiento post-publicación ("ver el post") | Inhabilitación | `facebook_poster.py` | 30 min |
-| 5 | Think time antes de tipear (log-normal) | Restricción temporal | `facebook_poster.py` | 10 min |
-| 6 | Decaimiento de velocidad de escritura al final | Inhabilitación | `facebook_poster.py` | 20 min |
-| 7 | Offset temporal random entre cuentas en mismo job | Bloqueo comercial | `account_manager.py` | 20 min |
+| 4 | Comportamiento post-publicación ("ver el post") | Inhabilitación | `facebook_poster_async.py` | 30 min |
+| 5 | Think time antes de tipear (log-normal) | Restricción temporal | `facebook_poster_async.py` | 10 min |
+| 6 | Decaimiento de velocidad de escritura al final | Inhabilitación | `facebook_poster_async.py` | 20 min |
+| 7 | Offset temporal random entre cuentas en mismo job | Bloqueo comercial | `account_manager_async.py` | 20 min |
 | 8 | Maduración gradual de cuentas nuevas | Inhabilitación | `config.py` + `job_store.py` | 2–3 h |
 | 9 | Filtro de spam lexicon en texto antes de publicar | Shadow ban | `text_variation.py` | 1 h |
-| 10 | Clasificación de grupos por tamaño y límite diferenciado | Shadow ban | `config.py` + `facebook_poster.py` | 2 h |
+| 10 | Clasificación de grupos por tamaño y límite diferenciado | Shadow ban | `config.py` + `facebook_poster_async.py` | 2 h |
 
 ---
 
