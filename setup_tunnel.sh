@@ -26,7 +26,7 @@ warn()  { echo -e "${YELLOW}  ⚠${RESET} $*"; }
 step()  { echo -e "\n${CYAN}${BOLD}[$*]${RESET}"; }
 hr()    { echo -e "${BOLD}──────────────────────────────────────────────${RESET}"; }
 
-PROJECT_DIR="$(dirname "$0")/facebook_auto_poster"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/facebook_auto_poster"
 
 # Archivos de estado (compartidos entre backends)
 URL_FILE="$HOME/.cloudflared/fb-autoposter.url"          # URL pública final
@@ -210,6 +210,7 @@ EOF
         info "El túnel se activará cuando arranques: python main.py"
     fi
     kill $NGROK_PID 2>/dev/null || true
+    wait $NGROK_PID 2>/dev/null || true
 
     _print_success "$STATIC_URL" "ngrok"
 }
@@ -295,6 +296,7 @@ EOF
         warn "No responde aún (normal si Flask no está activo)"
     fi
     kill $CF_PID 2>/dev/null || true
+    wait $CF_PID 2>/dev/null || true
 
     _print_success "$STATIC_URL" "cloudflare"
 }
