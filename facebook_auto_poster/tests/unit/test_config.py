@@ -124,3 +124,37 @@ def test_timezone_different_from_utc_inside():
     """'Europe/Madrid' UTC+2: UTC 10:00 = 12:00 local → dentro (7,23)."""
     with _patch_now(10):
         assert is_account_hour_allowed(_account("Europe/Madrid", (7, 23))) is True
+
+
+# ---------------------------------------------------------------------------
+# P2.2 — Validación de active_hours
+# ---------------------------------------------------------------------------
+
+def test_invalid_active_hours_start_greater_than_end():
+    """active_hours (23, 7) es inválido — debería normalizar a (7, 23)."""
+    account = _account("UTC", active_hours=(23, 7))
+    assert account.active_hours == (7, 23)
+
+
+def test_invalid_active_hours_start_out_of_range():
+    """active_hours (25, 23) es inválido (25 > 23) — debería normalizar a (7, 23)."""
+    account = _account("UTC", active_hours=(25, 23))
+    assert account.active_hours == (7, 23)
+
+
+def test_invalid_active_hours_end_out_of_range():
+    """active_hours (7, 30) es inválido (30 > 23) — debería normalizar a (7, 23)."""
+    account = _account("UTC", active_hours=(7, 30))
+    assert account.active_hours == (7, 23)
+
+
+def test_valid_active_hours_boundary():
+    """active_hours (0, 23) es válido."""
+    account = _account("UTC", active_hours=(0, 23))
+    assert account.active_hours == (0, 23)
+
+
+def test_valid_active_hours_single_hour():
+    """active_hours (12, 12) es válido (sólo hour 12 permitida)."""
+    account = _account("UTC", active_hours=(12, 12))
+    assert account.active_hours == (12, 12)

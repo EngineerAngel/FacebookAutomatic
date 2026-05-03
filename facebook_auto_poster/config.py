@@ -7,6 +7,7 @@ on the first run before the DB is populated.
 """
 
 import json
+import logging
 import os
 import random
 import sys
@@ -107,6 +108,31 @@ CONFIG: dict = {
 
 
 # ---------------------------------------------------------------------------
+# Validación de active_hours
+# ---------------------------------------------------------------------------
+def _validate_active_hours(hours: tuple[int, int], account_name: str = "") -> tuple[int, int]:
+    """Valida rango de horas. Si es inválido, retorna (7, 23) con WARNING."""
+    start, end = hours
+    logger = logging.getLogger(__name__)
+
+    if not (0 <= start <= 23 and 0 <= end <= 23):
+        logger.warning(
+            "Cuenta '%s' tiene active_hours inválido %s (fuera de [0-23]) — fallback a (7, 23)",
+            account_name, hours,
+        )
+        return (7, 23)
+
+    if start > end:
+        logger.warning(
+            "Cuenta '%s' tiene active_hours inválido %s (start > end) — fallback a (7, 23)",
+            account_name, hours,
+        )
+        return (7, 23)
+
+    return hours
+
+
+# ---------------------------------------------------------------------------
 # AccountConfig dataclass
 # ---------------------------------------------------------------------------
 @dataclass
@@ -115,7 +141,7 @@ class AccountConfig:
     email: str
     password: str
     groups: list[str] = field(default_factory=list)
-    timezone: str = "America/Mexico_City"
+    timezone: str = "UTC"
     active_hours: tuple[int, int] = (7, 23)
     fingerprint: dict = field(default_factory=dict)
     log_file: str = ""
@@ -127,6 +153,7 @@ class AccountConfig:
             self.log_file = str(base / "logs" / f"{self.name}.log")
         if not self.screenshots_dir:
             self.screenshots_dir = str(base / "screenshots" / self.name)
+        self.active_hours = _validate_active_hours(self.active_hours, self.name)
 
 
 def load_fingerprints() -> list[dict]:
@@ -211,7 +238,7 @@ def load_accounts() -> list[AccountConfig]:
                         email=r["email"],
                         password=password,
                         groups=groups,
-                        timezone=r.get("timezone") or "America/Mexico_City",
+                        timezone=r.get("timezone") or "UTC",
                         active_hours=active_hours,
                         fingerprint=fingerprint,
                     )
