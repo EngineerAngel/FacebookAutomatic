@@ -227,6 +227,7 @@ tr:hover td { background: #151823; }
     <button class="tab-btn" data-tab="metrics">Métricas</button>
     <button class="tab-btn" data-tab="maintenance">Mantenimiento</button>
     <button class="tab-btn" data-tab="templates">Plantillas</button>
+    <button class="tab-btn" data-tab="proxies">Proxies</button>
   </div>
 
   <!-- ══════ TAB: Cuentas ══════ -->
@@ -435,6 +436,7 @@ tr:hover td { background: #151823; }
 
   <!-- ══════ TAB: Plantillas ══════ -->
   <div id="tab-templates" class="tab-panel">
+
     <div class="section-hdr">
       <h2>Plantillas de publicación</h2>
       <button class="btn btn-primary btn-sm" onclick="openTemplateModal()">+ Nueva plantilla</button>
@@ -454,6 +456,48 @@ tr:hover td { background: #151823; }
           <tr><td colspan="5" class="empty">Cargando…</td></tr>
         </tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- ══════ TAB: Proxies ══════ -->
+  <div id="tab-proxies" class="tab-panel">
+    <div class="section-hdr">
+      <h2>Pool de proxies SIM</h2>
+      <button class="btn btn-primary btn-sm" onclick="openProxyModal()">+ Agregar nodo</button>
+    </div>
+    <p style="color:#8892b0;font-size:13px;margin-bottom:1.5rem">
+      Cada teléfono Android con USB tethering actúa como gateway SOCKS5.
+      El health checker verifica el estado cada 2 minutos automáticamente.
+    </p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>ID</th><th>Label</th><th>Estado</th><th>Servidor</th><th>Última IP</th><th>Cuentas</th><th>Acciones</th>
+        </tr></thead>
+        <tbody id="proxies-body">
+          <tr><td colspan="7" class="empty">Cargando...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div style="margin-top:2.5rem">
+      <div class="section-hdr" style="margin-bottom:.75rem">
+        <h2>Asignaciones por cuenta</h2>
+        <button class="btn btn-edit btn-sm" onclick="loadProxies()">↻ Actualizar</button>
+      </div>
+      <p style="color:#8892b0;font-size:13px;margin-bottom:1rem">
+        Cada cuenta debe tener un nodo diferente para evitar ban por IP compartida.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Cuenta</th><th>Nodo principal</th><th>Nodo secundario</th><th>Acciones</th>
+          </tr></thead>
+          <tbody id="proxy-assignments-body">
+            <tr><td colspan="4" class="empty">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -525,6 +569,34 @@ tr:hover td { background: #151823; }
     <div class="modal-actions">
       <button class="btn btn-cancel" onclick="closeTemplateModal()">Cancelar</button>
       <button class="btn btn-save" onclick="saveTemplate()">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ Modal proxy ══════ -->
+<div class="modal-bg" id="proxy-modal-bg">
+  <div class="modal">
+    <h3>Agregar nodo proxy</h3>
+    <div class="field">
+      <label>ID <small>(letras minúsculas, números y _, máx 40)</small></label>
+      <input type="text" id="pm-id" placeholder="phone1_sim" maxlength="40">
+    </div>
+    <div class="field">
+      <label>Etiqueta</label>
+      <input type="text" id="pm-label" placeholder="Teléfono 1 SIM" maxlength="100">
+    </div>
+    <div class="field">
+      <label>Servidor</label>
+      <input type="text" id="pm-server" placeholder="socks5://192.168.42.129:1080">
+      <p class="hint">Formatos aceptados: socks5://IP:PORT · http://IP:PORT</p>
+    </div>
+    <div class="field">
+      <label>Notas <small>(opcional)</small></label>
+      <input type="text" id="pm-notes" placeholder="Samsung A32, SIM Telcel" maxlength="200">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-cancel" onclick="closeProxyModal()">Cancelar</button>
+      <button class="btn btn-save" onclick="saveProxy()">Guardar</button>
     </div>
   </div>
 </div>
@@ -1204,12 +1276,19 @@ async function addDiscoveredGroupInline(accountName, groupId, btn) {
   }
 }
 
-// ─── Cerrar modal con Escape ──────────────────────────────────────────────
+// ─── Cerrar modales con Escape y click-fuera ──────────────────────────────
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') closeModal();
+  if (e.key === 'Escape') { closeModal(); closeTemplateModal(); closeProxyModal(); }
 });
-document.getElementById('modal-bg').addEventListener('click', e => {
-  if (e.target === document.getElementById('modal-bg')) closeModal();
+['modal-bg', 'template-modal-bg', 'proxy-modal-bg'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('click', e => {
+    if (e.target === el) {
+      if (id === 'modal-bg') closeModal();
+      else if (id === 'template-modal-bg') closeTemplateModal();
+      else closeProxyModal();
+    }
+  });
 });
 
 // ─── Métricas (Fase 3.3b) ─────────────────────────────────────────────────
@@ -1328,6 +1407,7 @@ tabButtons.forEach(btn => {
   btn.addEventListener('click', function() {
     if (this.getAttribute('data-tab') === 'maintenance') loadRepairs();
     if (this.getAttribute('data-tab') === 'templates')   loadTemplates();
+    if (this.getAttribute('data-tab') === 'proxies')     loadProxies();
   });
 });
 
@@ -1472,6 +1552,137 @@ function pollLogin(runId, accountName, btn) {
       loadAccounts();
     }
   }, 3000);
+}
+
+// ─── Proxies ──────────────────────────────────────────────────────────────
+let _proxyNodes = [];
+let _proxyAssignments = [];
+
+async function loadProxies() {
+  const { ok, data } = await api('GET', '/admin/api/proxies');
+  if (!ok) {
+    document.getElementById('proxies-body').innerHTML =
+      '<tr><td colspan="7" class="empty" style="color:#fca5a5">Error al cargar proxies</td></tr>';
+    return;
+  }
+  _proxyNodes = data.nodes || [];
+  _proxyAssignments = data.assignments || [];
+  renderProxyNodes();
+  renderProxyAssignments();
+}
+
+function _proxyStatusBadge(status) {
+  if (status === 'online')      return '<span class="badge ok">● online</span>';
+  if (status === 'offline')     return '<span class="badge fail">● offline</span>';
+  if (status === 'maintenance') return '<span class="badge">⚙ maint.</span>';
+  return `<span class="badge">${esc(status || '?')}</span>`;
+}
+
+function renderProxyNodes() {
+  const tbody = document.getElementById('proxies-body');
+  if (!_proxyNodes.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">Sin nodos registrados. Usa "+ Agregar nodo" o <code>setup_phone_proxy.sh --add</code></td></tr>';
+    return;
+  }
+  const countByNode = {};
+  _proxyAssignments.forEach(a => {
+    if (a.primary_node) countByNode[a.primary_node] = (countByNode[a.primary_node] || 0) + 1;
+  });
+  tbody.innerHTML = _proxyNodes.map(n => `
+    <tr>
+      <td style="font-family:monospace;font-size:.85rem">${esc(n.id)}</td>
+      <td>${esc(n.label)}</td>
+      <td>${_proxyStatusBadge(n.status)}</td>
+      <td style="font-size:.82rem;color:#64748b">${esc(n.server)}</td>
+      <td style="font-family:monospace;font-size:.82rem">${esc(n.last_seen_ip || '—')}</td>
+      <td style="text-align:center">${countByNode[n.id] || 0}</td>
+      <td style="white-space:nowrap">
+        ${n.status !== 'online'
+          ? `<button class="btn btn-save btn-sm" onclick="setNodeStatus('${esc(n.id)}','online')">Online</button>`
+          : `<button class="btn btn-edit btn-sm" onclick="setNodeStatus('${esc(n.id)}','maintenance')">Maint.</button>`}
+        <button class="btn btn-del btn-sm" style="margin-left:.4rem"
+          onclick="deleteProxyNode('${esc(n.id)}','${esc(n.label)}')">✕</button>
+      </td>
+    </tr>`).join('');
+}
+
+function renderProxyAssignments() {
+  const tbody = document.getElementById('proxy-assignments-body');
+  const nodeLabel = {};
+  _proxyNodes.forEach(n => { nodeLabel[n.id] = n.label; });
+  const assignMap = {};
+  _proxyAssignments.forEach(a => { assignMap[a.account_name] = a; });
+
+  api('GET', '/admin/api/accounts').then(({ ok, data }) => {
+    if (!ok || !data.length) {
+      tbody.innerHTML = '<tr><td colspan="4" class="empty">Sin cuentas</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.map(acc => {
+      const a = assignMap[acc.name];
+      const fmtNode = id => id ? `${id}${nodeLabel[id] ? ' — ' + nodeLabel[id] : ''}` : null;
+      const primary   = a ? (fmtNode(a.primary_node)   || a.primary_node)   : null;
+      const secondary = a ? (fmtNode(a.secondary_node) || null)              : null;
+      return `<tr>
+        <td>${esc(acc.name)}</td>
+        <td style="font-size:.85rem">${primary ? esc(primary) : '<span style="color:#fca5a5">Sin proxy</span>'}</td>
+        <td style="font-size:.85rem;color:#64748b">${secondary ? esc(secondary) : '—'}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-primary btn-sm" onclick="autoAssignProxy('${esc(acc.name)}')">Auto-asignar</button>
+          ${a ? `<button class="btn btn-del btn-sm" style="margin-left:.4rem"
+            onclick="removeProxyAssignment('${esc(acc.name)}')">✕ Quitar</button>` : ''}
+        </td>
+      </tr>`;
+    }).join('');
+  });
+}
+
+function openProxyModal() {
+  ['pm-id','pm-label','pm-server','pm-notes'].forEach(id => { document.getElementById(id).value = ''; });
+  document.getElementById('proxy-modal-bg').classList.add('open');
+}
+
+function closeProxyModal() {
+  document.getElementById('proxy-modal-bg').classList.remove('open');
+}
+
+async function saveProxy() {
+  const id     = document.getElementById('pm-id').value.trim().toLowerCase();
+  const label  = document.getElementById('pm-label').value.trim();
+  const server = document.getElementById('pm-server').value.trim();
+  const notes  = document.getElementById('pm-notes').value.trim();
+  if (!id || !label || !server) { toast('ID, etiqueta y servidor son obligatorios', true); return; }
+  const { ok, data } = await api('POST', '/admin/api/proxies', { id, label, server, notes });
+  if (!ok) { toast(data.error || 'Error al registrar nodo', true); return; }
+  closeProxyModal();
+  toast(`Nodo '${id}' registrado`);
+  loadProxies();
+}
+
+async function deleteProxyNode(id, label) {
+  if (!confirm(`¿Eliminar el nodo proxy "${label}" (${id})?`)) return;
+  const { ok, data } = await api('DELETE', `/admin/api/proxies/${id}`);
+  if (ok) { toast('Nodo eliminado'); loadProxies(); }
+  else toast(data.error || 'Error al eliminar', true);
+}
+
+async function setNodeStatus(id, status) {
+  const { ok, data } = await api('PUT', `/admin/api/proxies/${id}/status`, { status });
+  if (ok) { toast(`Nodo '${id}' → ${status}`); loadProxies(); }
+  else toast(data.error || 'Error', true);
+}
+
+async function autoAssignProxy(accountName) {
+  const { ok, data } = await api('POST', `/admin/api/accounts/${accountName}/proxy`, { auto: true });
+  if (ok) { toast(`${accountName} → nodo ${data.primary_node}`); loadProxies(); }
+  else toast(data.error || 'Sin nodos disponibles', true);
+}
+
+async function removeProxyAssignment(accountName) {
+  if (!confirm(`¿Quitar la asignación de proxy de "${accountName}"?`)) return;
+  const res = await fetch(`/admin/api/accounts/${accountName}/proxy`, { method: 'DELETE', credentials: 'same-origin' });
+  if (res.status === 204) { toast(`Proxy de '${accountName}' eliminado`); loadProxies(); }
+  else { const d = await res.json().catch(() => ({})); toast(d.error || 'Error', true); }
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────
