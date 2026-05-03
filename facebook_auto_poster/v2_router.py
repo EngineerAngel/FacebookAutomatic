@@ -119,7 +119,7 @@ def handle_post(body: PostRequest):
     image_paths_v2 = [image_path] if image_path else []
     job_id = job_store.create_job(
         text=body.text,
-        accounts=body.accounts,
+        accounts=[a.name for a in runnable],
         image_paths=image_paths_v2,
         callback_url=body.callback_url,
         job_type="immediate",
@@ -181,7 +181,7 @@ def create_schedule(body: ScheduleRequest):
     return ScheduleCreated(
         job_id=job_id,
         scheduled_for=body.scheduled_for.isoformat(),
-        accounts=body.accounts or "todas",
+        accounts=body.accounts or [],
         text_preview=body.text[:80],
     )
 

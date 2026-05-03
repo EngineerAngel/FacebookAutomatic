@@ -73,7 +73,7 @@ class ScheduleCreated(BaseModel):
     status: str = "scheduled"
     job_id: str
     scheduled_for: str
-    accounts: list[str] | str
+    accounts: list[str]
     text_preview: str
 
 
@@ -98,5 +98,5 @@ class ScheduledJobOut(BaseModel):
 
 
 class ScheduleListResponse(BaseModel):
-    pending: list[dict]
+    pending: list[ScheduledJobOut]
     count: int
