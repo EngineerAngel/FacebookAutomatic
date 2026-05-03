@@ -235,6 +235,7 @@ def init_db() -> None:
             "ALTER TABLE accounts ADD COLUMN fingerprint_json TEXT",
             "ALTER TABLE accounts ADD COLUMN password_enc TEXT",
             "ALTER TABLE jobs ADD COLUMN group_ids TEXT",
+            "ALTER TABLE account_proxy_assignment ADD COLUMN last_used_at TEXT",
         ]:
             try:
                 conn.execute(stmt)
@@ -1252,12 +1253,60 @@ def list_proxy_assignments() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             """SELECT p.account_name, p.primary_node, p.secondary_node,
-                      p.assigned_at, n.label, n.status, n.last_seen_ip
+                      p.assigned_at, p.last_used_at, n.label, n.status, n.last_seen_ip
                FROM account_proxy_assignment p
                LEFT JOIN proxy_nodes n ON n.id = p.primary_node
                ORDER BY p.account_name"""
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def touch_proxy_assignment(account_name: str) -> None:
+    """Actualiza last_used_at al momento actual (llamar cuando se usa el proxy)."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE account_proxy_assignment SET last_used_at=? WHERE account_name=?",
+            (now, account_name),
+        )
+
+
+def count_accounts_for_node(node_id: str) -> int:
+    """Número de cuentas con primary_node = node_id."""
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM account_proxy_assignment WHERE primary_node=?",
+            (node_id,),
+        ).fetchone()
+        return row[0] if row else 0
+
+
+def get_lru_account_for_node(node_id: str) -> dict | None:
+    """Retorna la cuenta del nodo que lleva más tiempo sin usar el proxy (NULL primero)."""
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """SELECT account_name, last_used_at
+               FROM account_proxy_assignment
+               WHERE primary_node=?
+               ORDER BY last_used_at ASC NULLS FIRST
+               LIMIT 1""",
+            (node_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def last_node_use(node_id: str, exclude_account: str) -> str | None:
+    """MAX(last_used_at) del nodo excluyendo la cuenta indicada. None si sin uso."""
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            """SELECT MAX(last_used_at) as latest
+               FROM account_proxy_assignment
+               WHERE primary_node=?
+                 AND account_name != ?
+                 AND last_used_at IS NOT NULL""",
+            (node_id, exclude_account),
+        ).fetchone()
+        return row["latest"] if row and row["latest"] else None
 
 
 # ---------------------------------------------------------------------------
