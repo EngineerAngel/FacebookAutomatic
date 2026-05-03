@@ -64,9 +64,15 @@ def test_hour_before_window():
 
 
 def test_hour_after_window():
-    with _patch_now(23):  # 23 UTC, exactamente en el límite superior
-        # start <= hour < end → 7 <= 23 < 23 → False
-        assert is_account_hour_allowed(_account("UTC", (7, 23))) is False
+    with _patch_now(23):  # 23 UTC, fuera de ventana (7, 22)
+        # start <= hour <= end → 7 <= 23 <= 22 → False
+        assert is_account_hour_allowed(_account("UTC", (7, 22))) is False
+
+
+def test_hour_at_window_end_included():
+    with _patch_now(23):  # 23 UTC, exactamente en el límite superior de (7, 23)
+        # start <= hour <= end → 7 <= 23 <= 23 → True (bug G4 corregido)
+        assert is_account_hour_allowed(_account("UTC", (7, 23))) is True
 
 
 def test_boundary_start_included():
@@ -80,18 +86,20 @@ def test_boundary_one_before_start():
         assert is_account_hour_allowed(_account("UTC", (7, 23))) is False
 
 
-def test_impossible_window_always_false():
-    """Ventana (0, 0): ninguna hora satisface 0 <= h < 0."""
-    for utc_hour in (0, 6, 12, 18, 23):
+def test_window_zero_zero_only_midnight():
+    """Ventana (0, 0): 0 <= h <= 0 → solo medianoche permitida."""
+    with _patch_now(0):
+        assert is_account_hour_allowed(_account("UTC", (0, 0))) is True
+    for utc_hour in (1, 6, 12, 18, 23):
         with _patch_now(utc_hour):
             assert is_account_hour_allowed(_account("UTC", (0, 0))) is False
 
 
 def test_fullday_window_always_true():
-    """Ventana (0, 24): todas las horas satisfacen 0 <= h < 24."""
+    """Ventana (0, 23): todas las horas 0-23 satisfacen 0 <= h <= 23."""
     for utc_hour in range(24):
         with _patch_now(utc_hour):
-            assert is_account_hour_allowed(_account("UTC", (0, 24))) is True
+            assert is_account_hour_allowed(_account("UTC", (0, 23))) is True
 
 
 def test_timezone_mexico_city_inside():

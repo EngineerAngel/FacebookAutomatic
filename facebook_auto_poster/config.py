@@ -101,7 +101,7 @@ CONFIG: dict = {
     "gemini_degraded_cooldown_s": 300,
     # Claves primarias separadas por coma. Rota automáticamente si agota quota.
     # Formato: "clave1,clave2,clave3" (sin espacios).
-    "gemini_api_keys": os.getenv("GEMINI_API_KEYS", os.getenv("GEMINI_API_KEY", "")).split(","),
+    "gemini_api_keys": [k for k in os.getenv("GEMINI_API_KEYS", os.getenv("GEMINI_API_KEY", "")).split(",") if k.strip()],
     "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip(),
 }
 
@@ -146,7 +146,7 @@ def is_account_hour_allowed(account: AccountConfig) -> bool:
     """Verifica si la hora local de la cuenta está dentro de su ventana de publicación."""
     local_hour = datetime.now(ZoneInfo(account.timezone)).hour
     start, end = account.active_hours
-    return start <= local_hour < end
+    return start <= local_hour <= end
 
 
 # ---------------------------------------------------------------------------
