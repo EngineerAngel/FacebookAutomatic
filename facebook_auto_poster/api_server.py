@@ -26,6 +26,13 @@ Endpoints admin (requieren autenticación con ADMIN_KEY):
     PUT    /admin/api/proxies/<id>/status   → cambiar status manualmente
     POST   /admin/api/accounts/<name>/proxy → asignar proxy a cuenta
     DELETE /admin/api/accounts/<name>/proxy → quitar proxy de cuenta
+    GET    /admin/api/templates             → listar plantillas
+    POST   /admin/api/templates             → crear plantilla
+    GET    /admin/api/templates/<id>        → obtener plantilla
+    PUT    /admin/api/templates/<id>        → actualizar plantilla
+    DELETE /admin/api/templates/<id>        → eliminar plantilla
+    POST   /admin/api/upload-images         → subir 1–5 imágenes (devuelve paths)
+    GET    /admin/uploaded-images/<file>    → servir imagen guardada (preview admin)
 """
 
 import json
@@ -33,6 +40,7 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 import threading
 import time
 import uuid
@@ -317,6 +325,10 @@ def _safe_image_paths(value) -> tuple[list[str] | None, str | None]:
             return None, "image_path inválido o fuera del directorio permitido"
         out.append(safe)
     return out, None
+
+
+def _validate_template_id(template_id: str) -> bool:
+    return bool(_TEMPLATE_ID_PATTERN.match(template_id))
 
 
 def _validate_image_upload(file) -> tuple[str | None, str | None]:
@@ -1258,3 +1270,144 @@ def admin_cancel_schedule(job_id: str):
         logger.info("Job %s cancelado via admin", job_id)
         return "", 204
     return jsonify({"error": f"Job '{job_id}' no encontrado o ya no está pendiente"}), 404
+
+
+# ===========================================================================
+# ADMIN API — Upload de imágenes (independiente del flujo de publicación)
+# ===========================================================================
+
+@app.post("/admin/api/upload-images")
+@admin_required
+def admin_upload_images():
+    """Sube 1–5 imágenes y devuelve sus rutas seguras.
+
+    No crea jobs — solo persiste los archivos en UPLOAD_DIR para que el
+    cliente las incluya luego en una plantilla o publicación.
+    """
+    files = [f for f in request.files.getlist("image") if f and f.filename]
+    if not files:
+        return jsonify({"error": "No se enviaron archivos"}), 400
+    if len(files) > _MAX_IMAGES:
+        return jsonify({"error": f"Máximo {_MAX_IMAGES} imágenes por subida"}), 400
+
+    saved_paths: list[str] = []
+    for f in files:
+        path, err = _validate_image_upload(f)
+        if err:
+            return jsonify({"error": err}), 400
+        saved_paths.append(path)  # type: ignore[arg-type]
+
+    return jsonify({"image_paths": saved_paths}), 201
+
+
+@app.get("/admin/uploaded-images/<path:filename>")
+@admin_required
+def admin_serve_uploaded_image(filename: str):
+    """Sirve una imagen de UPLOAD_DIR para previews del panel admin.
+
+    Verifica path traversal: solo devuelve archivos dentro de UPLOAD_DIR.
+    """
+    safe = _safe_image_path(str(UPLOAD_DIR / filename))
+    if not safe:
+        return jsonify({"error": "Imagen no encontrada"}), 404
+    return send_from_directory(str(UPLOAD_DIR), Path(safe).name)
+
+
+# ===========================================================================
+# ADMIN API — Plantillas CRUD
+# ===========================================================================
+
+@app.get("/admin/api/templates")
+@admin_required
+def admin_list_templates():
+    templates = job_store.list_templates()
+    return jsonify(templates), 200
+
+
+@app.post("/admin/api/templates")
+@admin_required
+def admin_create_template():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    text = (data.get("text") or "").strip()
+
+    if not name or len(name) < 2 or len(name) > MAX_TEMPLATE_NAME_CHARS:
+        return jsonify({"error": f"El nombre debe tener entre 2 y {MAX_TEMPLATE_NAME_CHARS} caracteres"}), 400
+    if not text or len(text) < MIN_TEMPLATE_TEXT_CHARS:
+        return jsonify({"error": f"El texto debe tener entre {MIN_TEMPLATE_TEXT_CHARS} y {MAX_TEMPLATE_TEXT_CHARS} caracteres"}), 400
+    if len(text) > MAX_TEMPLATE_TEXT_CHARS:
+        return jsonify({"error": f"El texto no puede exceder {MAX_TEMPLATE_TEXT_CHARS} caracteres"}), 400
+
+    raw_paths = data.get("image_paths") if data.get("image_paths") is not None else data.get("image_path")
+    image_paths, err = _safe_image_paths(raw_paths)
+    if err:
+        return jsonify({"error": err}), 400
+
+    try:
+        template_id = job_store.create_template(name, text, "", image_paths)
+        logger.info("Plantilla '%s' creada (id=%s) via admin", name, template_id)
+        return jsonify({"status": "created", "id": template_id, "name": name}), 201
+    except sqlite3.IntegrityError:
+        return jsonify({"error": f"Ya existe una plantilla con el nombre '{name}'"}), 409
+    except Exception:
+        logger.exception("Error creando plantilla (nombre='%s')", name)
+        return jsonify({"error": "Error interno al crear plantilla"}), 500
+
+
+@app.get("/admin/api/templates/<template_id>")
+@admin_required
+def admin_get_template(template_id: str):
+    if not _validate_template_id(template_id):
+        return jsonify({"error": "ID de plantilla inválido"}), 400
+    template = job_store.get_template(template_id)
+    if not template:
+        return jsonify({"error": "Plantilla no encontrada"}), 404
+    return jsonify(template), 200
+
+
+@app.put("/admin/api/templates/<template_id>")
+@admin_required
+def admin_update_template(template_id: str):
+    if not _validate_template_id(template_id):
+        return jsonify({"error": "ID de plantilla inválido"}), 400
+    if not job_store.get_template(template_id):
+        return jsonify({"error": "Plantilla no encontrada"}), 404
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip() or None
+    text = (data.get("text") or "").strip() or None
+
+    if name is not None and (len(name) < 2 or len(name) > MAX_TEMPLATE_NAME_CHARS):
+        return jsonify({"error": f"El nombre debe tener entre 2 y {MAX_TEMPLATE_NAME_CHARS} caracteres"}), 400
+    if text is not None and (len(text) < MIN_TEMPLATE_TEXT_CHARS or len(text) > MAX_TEMPLATE_TEXT_CHARS):
+        return jsonify({"error": f"El texto debe tener entre {MIN_TEMPLATE_TEXT_CHARS} y {MAX_TEMPLATE_TEXT_CHARS} caracteres"}), 400
+
+    image_paths: list[str] | None = None
+    if "image_paths" in data or "image_path" in data:
+        raw_paths = data.get("image_paths") if data.get("image_paths") is not None else data.get("image_path")
+        image_paths, err = _safe_image_paths(raw_paths)
+        if err:
+            return jsonify({"error": err}), 400
+
+    try:
+        success = job_store.update_template(template_id, name, text, None, image_paths)
+        if not success:
+            return jsonify({"error": "No hay campos para actualizar"}), 400
+        logger.info("Plantilla '%s' actualizada via admin", template_id)
+        return jsonify({"status": "updated", "id": template_id}), 200
+    except sqlite3.IntegrityError:
+        return jsonify({"error": f"Ya existe una plantilla con el nombre '{name}'"}), 409
+    except Exception:
+        logger.exception("Error actualizando plantilla (id='%s')", template_id)
+        return jsonify({"error": "Error interno al actualizar plantilla"}), 500
+
+
+@app.delete("/admin/api/templates/<template_id>")
+@admin_required
+def admin_delete_template(template_id: str):
+    if not _validate_template_id(template_id):
+        return jsonify({"error": "ID de plantilla inválido"}), 400
+    if job_store.delete_template(template_id):
+        logger.info("Plantilla '%s' eliminada via admin", template_id)
+        return "", 204
+    return jsonify({"error": "Plantilla no encontrada"}), 404
