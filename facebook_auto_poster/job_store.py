@@ -7,6 +7,7 @@ Tablas:
   login_events — historial de intentos de login
   jobs         — cola de trabajos (inmediatos y agendados)
   job_results  — resultados por cuenta/grupo
+  templates    — plantillas de publicación reutilizables
 
 Base de datos: jobs.db (local, gitignored, nunca expuesto por API)
 """
@@ -28,6 +29,34 @@ def _connect() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+# ---------------------------------------------------------------------------
+# Helpers para imagen(es) — compatibilidad JSON array ↔ string legacy
+# ---------------------------------------------------------------------------
+
+def _decode_image_paths(raw: str | None) -> list[str]:
+    """Decodifica el campo image_path (TEXT) tolerando ambos formatos:
+    JSON array (nuevo) o string crudo (legacy). None/'' → lista vacía."""
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return [raw]
+    if isinstance(value, list):
+        return [str(p) for p in value if p]
+    if isinstance(value, str):
+        return [value] if value else []
+    return []
+
+
+def _encode_image_paths(paths: list[str] | None) -> str | None:
+    """Serializa una lista de rutas a JSON para persistir en image_path (TEXT).
+    Lista vacía o None → None (NULL en DB)."""
+    if not paths:
+        return None
+    return json.dumps(list(paths))
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +211,17 @@ def init_db() -> None:
                 created_at   TEXT DEFAULT (datetime('now')),
                 reviewed_at  TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS templates (
+                id         TEXT PRIMARY KEY,
+                name       TEXT UNIQUE NOT NULL,
+                text       TEXT NOT NULL,
+                url        TEXT NOT NULL DEFAULT '',
+                image_path TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_templates_created ON templates(created_at DESC);
         """)
 
         # Migraciones seguras — no fallan si la columna ya existe
@@ -194,6 +234,7 @@ def init_db() -> None:
             "ALTER TABLE accounts ADD COLUMN ban_cooldown_until TEXT",
             "ALTER TABLE accounts ADD COLUMN fingerprint_json TEXT",
             "ALTER TABLE accounts ADD COLUMN password_enc TEXT",
+            "ALTER TABLE jobs ADD COLUMN group_ids TEXT",
         ]:
             try:
                 conn.execute(stmt)
@@ -1265,3 +1306,106 @@ def get_approved_selector(selector_key: str) -> str | None:
             (selector_key,),
         ).fetchone()
         return row["candidate"] if row else None
+
+
+# ---------------------------------------------------------------------------
+# Templates — plantillas de publicación reutilizables
+# ---------------------------------------------------------------------------
+
+def _row_to_template(row) -> dict:
+    return {
+        "id":          row["id"],
+        "name":        row["name"],
+        "text":        row["text"],
+        "url":         row["url"],
+        "image_paths": _decode_image_paths(row["image_path"]),
+        "created_at":  row["created_at"],
+    }
+
+
+def create_template(
+    name: str,
+    text: str,
+    url: str,
+    image_paths: list[str] | None = None,
+) -> str:
+    """Crea una nueva plantilla. Retorna el ID generado (UUID corto).
+    Lanza sqlite3.IntegrityError si ya existe una plantilla con ese nombre."""
+    template_id = uuid.uuid4().hex[:12]
+    now = datetime.now().isoformat()
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO templates (id, name, text, url, image_path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (template_id, name, text, url, _encode_image_paths(image_paths), now),
+        )
+    return template_id
+
+
+def get_template(template_id: str) -> dict | None:
+    """Obtiene una plantilla por ID, o None si no existe."""
+    with _connect() as conn:
+        row = conn.execute(
+            """SELECT id, name, text, url, image_path, created_at
+               FROM templates WHERE id=?""",
+            (template_id,),
+        ).fetchone()
+        return _row_to_template(row) if row else None
+
+
+def list_templates() -> list[dict]:
+    """Lista todas las plantillas ordenadas por fecha (más recientes primero)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT id, name, text, url, image_path, created_at
+               FROM templates
+               ORDER BY created_at DESC""",
+        ).fetchall()
+        return [_row_to_template(r) for r in rows]
+
+
+def update_template(
+    template_id: str,
+    name: str | None = None,
+    text: str | None = None,
+    url: str | None = None,
+    image_paths: list[str] | None = None,
+) -> bool:
+    """Actualiza solo los campos non-None de una plantilla.
+    Retorna True si existía y fue modificada. False si no hay campos a cambiar."""
+    parts: list[str] = []
+    params: list = []
+
+    if name is not None:
+        parts.append("name = ?")
+        params.append(name)
+    if text is not None:
+        parts.append("text = ?")
+        params.append(text)
+    if url is not None:
+        parts.append("url = ?")
+        params.append(url)
+    if image_paths is not None:
+        parts.append("image_path = ?")
+        params.append(_encode_image_paths(image_paths))
+
+    if not parts:
+        return False
+
+    params.append(template_id)
+    with _connect() as conn:
+        cur = conn.execute(
+            f"UPDATE templates SET {', '.join(parts)} WHERE id=?",
+            params,
+        )
+        return cur.rowcount > 0
+
+
+def delete_template(template_id: str) -> bool:
+    """Elimina una plantilla. Retorna True si existía."""
+    with _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM templates WHERE id=?",
+            (template_id,),
+        )
+        return cur.rowcount > 0
