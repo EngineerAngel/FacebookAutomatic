@@ -256,8 +256,11 @@ def _validate_account_input(name: str, email: str, groups: list) -> str | None:
         return err
     if groups and isinstance(groups, list):
         for g in groups:
-            if not str(g).strip().isdigit():
-                return f"ID de grupo inválido: '{g}' — solo se aceptan números"
+            if not _is_valid_group_id(str(g)):
+                return (
+                    f"ID de grupo inválido: '{g}' — acepta números (ej: 123456789012345) "
+                    "o slugs (ej: trabajosdemeridayucatan). Evita IDs de prueba como 5555555555"
+                )
     return None
 
 
