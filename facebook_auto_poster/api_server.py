@@ -770,6 +770,7 @@ def admin_list_accounts():
     for r in rows:
         r["has_custom_password"] = bool(r.pop("password_enc", None))
         groups_list = json.loads(r.get("groups") or "[]")
+        r["groups"] = groups_list
         r["has_groups"] = len(groups_list) > 0
     return jsonify(rows)
 

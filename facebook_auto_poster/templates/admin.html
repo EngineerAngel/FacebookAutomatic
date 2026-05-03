@@ -654,7 +654,7 @@ async function loadAccounts() {
     return;
   }
   data.forEach(acc => {
-    const groups = JSON.parse(acc.groups || '[]');
+    const groups = Array.isArray(acc.groups) ? acc.groups : JSON.parse(acc.groups || '[]');
     const tr = document.createElement('tr');
 
     const tdName = document.createElement('td');
@@ -753,7 +753,7 @@ function openModal(acc = null) {
   document.getElementById('modal-title').textContent = isEdit ? 'Editar cuenta' : 'Agregar cuenta';
   document.getElementById('f-name').value    = acc ? acc.name  : '';
   document.getElementById('f-email').value   = acc ? acc.email : '';
-  const groups = acc ? JSON.parse(acc.groups || '[]') : [];
+  const groups = acc ? Array.isArray(acc.groups) ? acc.groups : JSON.parse(acc.groups || '[]') : [];
   document.getElementById('f-groups').value  = groups.join(', ');
 
   // Inicializar selector de contraseña
@@ -1126,7 +1126,7 @@ async function loadProfilesDiscovery() {
 
   container.innerHTML = '';
   data.forEach(acc => {
-    const groups = JSON.parse(acc.groups || '[]');
+    const groups = Array.isArray(acc.groups) ? acc.groups : JSON.parse(acc.groups || '[]');
     const groupLabel = groups.length
       ? `${groups.length} grupo${groups.length !== 1 ? 's' : ''} configurado${groups.length !== 1 ? 's' : ''}`
       : 'Sin grupos configurados';
