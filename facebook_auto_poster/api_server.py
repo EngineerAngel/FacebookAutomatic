@@ -26,6 +26,8 @@ Endpoints admin (requieren autenticación con ADMIN_KEY):
     PUT    /admin/api/proxies/<id>/status   → cambiar status manualmente
     POST   /admin/api/accounts/<name>/proxy → asignar proxy a cuenta
     DELETE /admin/api/accounts/<name>/proxy → quitar proxy de cuenta
+    POST   /admin/api/accounts/<name>/login → iniciar sesión manual (async + polling)
+    GET    /admin/api/accounts/<name>/login/<run_id> → estado del login manual
     GET    /admin/api/templates             → listar plantillas
     POST   /admin/api/templates             → crear plantilla
     GET    /admin/api/templates/<id>        → obtener plantilla
@@ -82,6 +84,9 @@ _executor = ThreadPoolExecutor(
     max_workers=CONFIG.get("max_concurrent_workers", 2),
     thread_name_prefix="fb-worker",
 )
+
+# Estado de runs de login manual — en memoria, no necesita persistencia en BD
+_login_runs: dict[str, dict] = {}
 
 
 @app.get("/")
@@ -873,6 +878,120 @@ def admin_set_account_password(name: str):
 
     logger.info("Password individual configurado para cuenta '%s'", name)
     return jsonify({"status": "updated", "account": name})
+
+
+# ===========================================================================
+# ADMIN API — Login manual de cuenta
+# ===========================================================================
+
+def _run_login(run_id: str, account_name: str) -> None:
+    """Abre Chromium para la cuenta indicada y hace login guardando la cookie.
+
+    Corre en un thread daemon. Usa FacebookPosterAsync + asyncio.run() porque
+    fase-3 eliminó el poster sync; el thread no tiene event loop propio.
+    Lee directo de list_accounts_full() para incluir cuentas sin grupos.
+    """
+    _login_runs[run_id] = {"status": "running", "message": "Iniciando…", "account": account_name}
+
+    try:
+        rows = job_store.list_accounts_full()
+        row = next((r for r in rows if r["name"] == account_name), None)
+        if not row:
+            _login_runs[run_id] = {
+                "status": "error",
+                "message": f"Cuenta '{account_name}' no encontrada",
+                "account": account_name,
+            }
+            return
+
+        global_password = os.getenv("FB_PASSWORD", "").strip()
+        password = global_password
+        if row.get("password_enc"):
+            try:
+                from crypto import decrypt_password
+                password = decrypt_password(row["password_enc"])
+            except Exception:
+                pass
+
+        fp_raw = row.get("fingerprint_json")
+        fingerprint = json.loads(fp_raw) if fp_raw else pick_fingerprint([])
+        active_hours = tuple(json.loads(row.get("active_hours") or "[7, 23]"))
+        groups = json.loads(row.get("groups") or "[]")
+
+        account = AccountConfig(
+            name=row["name"],
+            email=row["email"],
+            password=password,
+            groups=groups,
+            timezone=row.get("timezone") or "America/Mexico_City",
+            active_hours=active_hours,
+            fingerprint=fingerprint,
+        )
+
+        from facebook_poster_async import FacebookPosterAsync
+        _login_runs[run_id]["message"] = "Abriendo navegador…"
+        poster = FacebookPosterAsync(account, CONFIG)
+        try:
+            _login_runs[run_id]["message"] = "Iniciando sesión en Facebook…"
+            success = asyncio.run(poster.login())
+            if success:
+                _login_runs[run_id] = {
+                    "status": "done",
+                    "message": "Sesión iniciada correctamente. Cookie guardada.",
+                    "account": account_name,
+                }
+                logger.info("[Login manual] '%s' — sesión iniciada OK (run=%s)", account_name, run_id)
+            else:
+                _login_runs[run_id] = {
+                    "status": "error",
+                    "message": "Login fallido. Verifica email/contraseña o que la cuenta no esté bloqueada.",
+                    "account": account_name,
+                }
+                logger.warning("[Login manual] '%s' — login fallido (run=%s)", account_name, run_id)
+        finally:
+            asyncio.run(poster.close())
+
+    except Exception as exc:
+        logger.exception("[Login manual] '%s' — error inesperado (run=%s)", account_name, run_id)
+        _login_runs[run_id] = {
+            "status": "error",
+            "message": str(exc),
+            "account": account_name,
+        }
+
+
+@app.post("/admin/api/accounts/<name>/login")
+@admin_required
+def admin_trigger_login(name: str):
+    """Inicia sesión en Facebook para la cuenta indicada (crea/renueva cookie).
+
+    Retorna {run_id, status: 'running'} para polling.
+    """
+    if not any(r["name"] == name for r in job_store.list_accounts_full()):
+        return jsonify({"error": f"Cuenta '{name}' no encontrada"}), 404
+
+    run_id = uuid.uuid4().hex[:12]
+    _login_runs[run_id] = {"status": "running", "message": "En cola…", "account": name}
+
+    threading.Thread(
+        target=_run_login,
+        args=(run_id, name),
+        daemon=True,
+        name=f"login-{name}",
+    ).start()
+
+    logger.info("[Login manual] Iniciado para '%s' (run=%s)", name, run_id)
+    return jsonify({"run_id": run_id, "status": "running"}), 202
+
+
+@app.get("/admin/api/accounts/<name>/login/<run_id>")
+@admin_required
+def admin_login_status(name: str, run_id: str):
+    """Polling del estado de un login manual."""
+    run = _login_runs.get(run_id)
+    if not run:
+        return jsonify({"error": "run_id no encontrado"}), 404
+    return jsonify(run), 200
 
 
 # ===========================================================================
