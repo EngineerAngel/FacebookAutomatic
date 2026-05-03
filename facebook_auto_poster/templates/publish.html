@@ -435,6 +435,37 @@ function renderImagePreviews() {
 }
 
 // ── Publish ──────────────────────────────────────────────────────────────────
+async function pollJobStatus(jobId) {
+  const POLL_INTERVAL = 3000;
+  const TIMEOUT_MS    = 5 * 60 * 1000;
+  const deadline      = Date.now() + TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, POLL_INTERVAL));
+    try {
+      const res  = await fetch('/admin/api/jobs/' + jobId, { credentials: 'same-origin' });
+      if (!res.ok) continue;
+      const job  = await res.json();
+      const { status, groups_ok, groups_fail, errors } = job;
+
+      if (status === 'done') {
+        const msg = groups_fail === 0
+          ? `Publicado en ${groups_ok} grupo${groups_ok !== 1 ? 's' : ''} correctamente`
+          : `Finalizado — ${groups_ok} OK, ${groups_fail} fallido${groups_fail !== 1 ? 's' : ''}`;
+        showStatus(msg, groups_fail === 0 ? 'ok' : 'error');
+        return;
+      }
+      if (status === 'failed' || status === 'interrupted') {
+        const detail = errors && errors.length ? ': ' + errors[0] : '';
+        showStatus('El job falló' + detail, 'error');
+        return;
+      }
+      showStatus('Publicando… (' + (groups_ok + groups_fail) + ' grupos procesados)', 'info');
+    } catch { /* ignorar errores de red transitorios */ }
+  }
+  showStatus('Timeout: no se recibió confirmación en 5 min. Revisar /admin.', 'error');
+}
+
 async function publish() {
   const text = document.getElementById('text').value.trim();
   if (!text) { showStatus('El texto es obligatorio', 'error'); return; }
@@ -475,11 +506,13 @@ async function publish() {
     const data = await res.json();
 
     if (res.ok) {
-      const msg = whenVal === 'scheduled'
-        ? 'Programado para ' + data.scheduled_for + ' — job_id: ' + data.job_id
-        : 'Enviado — job_id: ' + data.job_id + '. La publicación ocurre en segundo plano.';
-      showStatus(msg, 'ok');
-      if (whenVal === 'scheduled') loadScheduled();
+      if (whenVal === 'scheduled') {
+        showStatus('Programado para ' + data.scheduled_for + ' — job_id: ' + data.job_id, 'ok');
+        loadScheduled();
+      } else {
+        showStatus('Job aceptado — esperando confirmación…', 'info');
+        pollJobStatus(data.job_id);
+      }
     } else {
       showStatus('Error: ' + (data.error || 'Error desconocido'), 'error');
     }

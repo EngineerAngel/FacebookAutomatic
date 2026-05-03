@@ -666,6 +666,35 @@ def cancel_job(job_id: str) -> bool:
         return cursor.rowcount > 0
 
 
+def get_job(job_id: str) -> dict | None:
+    """Retorna un job con sus resultados, o None si no existe."""
+    with _connect() as conn:
+        r = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not r:
+            return None
+        results = conn.execute(
+            "SELECT success, error_msg, account_name, group_id FROM job_results WHERE job_id=?",
+            (job_id,),
+        ).fetchall()
+
+    succeeded = sum(1 for x in results if x["success"] and x["account_name"] != "__system__")
+    failed    = sum(1 for x in results if not x["success"] and x["account_name"] != "__system__")
+    errors    = [x["error_msg"] for x in results
+                 if x["account_name"] == "__system__" and x["error_msg"]]
+
+    return {
+        "id":          r["id"],
+        "status":      r["status"],
+        "accounts":    json.loads(r["accounts"]) if r["accounts"] else None,
+        "created_at":  r["created_at"],
+        "started_at":  r["started_at"],
+        "finished_at": r["finished_at"],
+        "groups_ok":   succeeded,
+        "groups_fail": failed,
+        "errors":      errors,
+    }
+
+
 def mark_running_as_interrupted() -> int:
     """Marca todos los jobs en estado 'running' como 'interrupted'.
 
