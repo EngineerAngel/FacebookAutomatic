@@ -302,6 +302,26 @@ Active critical risks: no per-account proxy (cluster-ban), session cookies unenc
 4. **Verificar el contrato de API antes y después** — anotar qué devuelve cada función actualmente y qué se espera.
 5. **Probar el flujo completo** — si se cambia una función, verificar que los otros consumidores no se rompieron.
 
+### Protocolo para implementaciones grandes
+
+Para cualquier tarea que toque más de 2 archivos o expanda la arquitectura existente:
+
+1. **Declarar scope antes de empezar** — listar explícitamente:
+   - **Whitelist**: archivos que se van a modificar
+   - **Blacklist**: archivos protegidos que no se tocan sin confirmación explícita del usuario
+   - **Read-only**: archivos que se pueden leer como referencia pero no modificar
+
+2. **Clasificar riesgo por bloque** — cada bloque de trabajo lleva etiqueta: `NULO / BAJO / MEDIO / ALTO`. Los bloques de riesgo ALTO van en sesión separada.
+
+3. **Documentar contrato antes de tocar** — para cada función que se va a cambiar, anotar en texto:
+   - Qué devuelve/hace hoy
+   - Qué se espera que devuelva/haga después
+   - Qué consumidores se ven afectados
+
+4. **Commit al terminar cada bloque** — no acumular varios bloques sin commit. El usuario revisa antes de continuar al siguiente.
+
+5. **Parar ante sorpresas** — si al implementar un bloque aparece que hay que tocar un archivo fuera del scope declarado, parar, reportar qué se encontró y por qué es necesario, y esperar confirmación antes de continuar.
+
 ## For Next Session
 
 ```bash
