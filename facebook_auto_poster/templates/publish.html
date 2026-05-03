@@ -229,6 +229,18 @@ tr:last-child td { border-bottom: none; }
   <section class="card">
     <h2>Nueva publicación</h2>
 
+    <div class="template-selector">
+      <button type="button" class="btn btn-secondary btn-sm" onclick="toggleTemplateSelector()">
+        📋 Usar plantilla
+      </button>
+      <div id="template-selector-panel" style="display:none">
+        <select id="template-select" onchange="applyTemplate(this.value)">
+          <option value="">— Seleccionar plantilla —</option>
+        </select>
+        <p class="hint" style="margin-top:.4rem">Al seleccionar una plantilla se rellena el texto y las imágenes guardadas.</p>
+      </div>
+    </div>
+
     <div class="field">
       <label class="field-label" for="text">Texto</label>
       <textarea id="text" placeholder="Escribe el texto de la publicación aquí…"></textarea>
@@ -548,6 +560,44 @@ async function cancelJob(id, btn) {
     btn.disabled = false;
     btn.textContent = 'Cancelar';
   }
+}
+
+// ── Template selector ─────────────────────────────────────────────────────────
+let _templates = [];
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function loadTemplatesForPublish() {
+  try {
+    const res = await fetch('/admin/api/templates', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    _templates = await res.json();
+    const sel = document.getElementById('template-select');
+    sel.innerHTML = '<option value="">— Seleccionar plantilla —</option>' +
+      _templates.map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('');
+  } catch { /* silencioso */ }
+}
+
+function toggleTemplateSelector() {
+  const p = document.getElementById('template-selector-panel');
+  p.style.display = p.style.display === 'none' ? 'block' : 'none';
+  if (p.style.display === 'block') loadTemplatesForPublish();
+}
+
+function applyTemplate(id) {
+  if (!id) return;
+  const t = _templates.find(x => x.id === id);
+  if (!t) return;
+  document.getElementById('text').value = t.text;
+  const cc = document.getElementById('char-count');
+  if (cc) cc.textContent = t.text.length + ' caracteres';
+  _templateImagePaths = t.image_paths || [];
+  _imageFiles = [];
+  renderImagePreviews();
+  document.getElementById('template-selector-panel').style.display = 'none';
+  document.getElementById('template-select').value = '';
 }
 
 // ── Status ────────────────────────────────────────────────────────────────────
