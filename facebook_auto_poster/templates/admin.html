@@ -188,6 +188,22 @@ tr:hover td { background: #151823; }
   border-radius: 4px; padding: 0.15rem 0.45rem; font-size: 0.72rem;
   margin-left: 0.4rem; vertical-align: middle;
 }
+
+/* ─── Template image previews ─────────────────────────────────────────── */
+.tf-image-previews { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.tf-img-item { position: relative; width: 88px; height: 88px; }
+.tf-img-item img { width: 100%; height: 100%; object-fit: cover; border-radius: 4px; }
+.tf-img-rm {
+  position: absolute; top: 2px; right: 2px;
+  background: rgba(0,0,0,.65); color: #fff; border: none;
+  border-radius: 50%; width: 20px; height: 20px; cursor: pointer;
+  font-size: 12px; line-height: 20px; text-align: center; padding: 0;
+}
+.tf-img-idx {
+  position: absolute; bottom: 2px; left: 2px;
+  background: rgba(0,0,0,.55); color: #fff; font-size: 10px;
+  padding: 1px 4px; border-radius: 2px;
+}
 </style>
 </head>
 <body>
@@ -210,6 +226,7 @@ tr:hover td { background: #151823; }
     <button class="tab-btn" data-tab="history">Logins</button>
     <button class="tab-btn" data-tab="metrics">Métricas</button>
     <button class="tab-btn" data-tab="maintenance">Mantenimiento</button>
+    <button class="tab-btn" data-tab="templates">Plantillas</button>
   </div>
 
   <!-- ══════ TAB: Cuentas ══════ -->
@@ -416,6 +433,30 @@ tr:hover td { background: #151823; }
     </p>
   </div>
 
+  <!-- ══════ TAB: Plantillas ══════ -->
+  <div id="tab-templates" class="tab-panel">
+    <div class="section-hdr">
+      <h2>Plantillas de publicación</h2>
+      <button class="btn btn-primary btn-sm" onclick="openTemplateModal()">+ Nueva plantilla</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Nombre</th>
+            <th>Texto</th>
+            <th>Imágenes</th>
+            <th>Creada</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="templates-body">
+          <tr><td colspan="5" class="empty">Cargando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
 </div><!-- /container -->
 
 <!-- ══════ Modal cuenta ══════ -->
@@ -458,6 +499,32 @@ tr:hover td { background: #151823; }
     <div class="modal-actions">
       <button class="btn btn-cancel" onclick="closeModal()">Cancelar</button>
       <button class="btn btn-save" onclick="saveAccount()">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ Modal plantilla ══════ -->
+<div class="modal-bg" id="template-modal-bg" style="display:none">
+  <div class="modal">
+    <h3 id="tpl-modal-title">Nueva plantilla</h3>
+    <div class="field">
+      <label>Nombre</label>
+      <input type="text" id="tf-name" maxlength="100" placeholder="Nombre de la plantilla">
+    </div>
+    <div class="field">
+      <label>Texto del post</label>
+      <textarea id="tf-text" rows="6" placeholder="Texto de la publicación…" oninput="updateTemplateCharCount()"></textarea>
+      <small style="color:#475569"><span id="tf-char-count">0</span> caracteres (mín. 10)</small>
+    </div>
+    <div class="field">
+      <label>Imágenes <small>(máx 5 — .jpg .jpeg .png .gif .webp)</small></label>
+      <input type="file" id="tf-images" multiple accept=".jpg,.jpeg,.png,.gif,.webp"
+             onchange="handleTemplateImagesChange()" style="display:block;margin-top:0.4rem;color:#e2e8f0">
+      <div class="tf-image-previews" id="tf-image-previews"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-cancel" onclick="closeTemplateModal()">Cancelar</button>
+      <button class="btn btn-save" onclick="saveTemplate()">Guardar</button>
     </div>
   </div>
 </div>
@@ -1263,6 +1330,121 @@ tabButtons.forEach(btn => {
     if (this.getAttribute('data-tab') === 'templates')   loadTemplates();
   });
 });
+
+// ─── Plantillas CRUD ──────────────────────────────────────────────────────
+let _tplEditing = null;
+let _tplExistingPaths = [];
+let _tplNewFiles = [];
+
+async function loadTemplates() {
+  const tbody = document.getElementById('templates-body');
+  const { ok, data } = await api('GET', '/admin/api/templates');
+  if (!ok) { tbody.innerHTML = '<tr><td colspan="5" class="empty" style="color:#fca5a5">Error al cargar plantillas</td></tr>'; return; }
+  if (!data.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">Sin plantillas creadas</td></tr>'; return; }
+  tbody.innerHTML = data.map(t => `
+    <tr>
+      <td>${esc(t.name)}</td>
+      <td style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.text.slice(0, 80))}${t.text.length > 80 ? '…' : ''}</td>
+      <td>${t.image_paths?.length || 0}</td>
+      <td>${fmt(t.created_at)}</td>
+      <td>
+        <button class="btn btn-edit btn-sm" onclick='openTemplateModal(${JSON.stringify(t)})'>✏ Editar</button>
+        <button class="btn btn-del btn-sm" style="margin-left:.4rem" onclick="deleteTemplate('${esc(t.id)}','${esc(t.name)}')">✕</button>
+      </td>
+    </tr>`).join('');
+}
+
+function openTemplateModal(t = null) {
+  _tplEditing = t ? t.id : null;
+  _tplExistingPaths = t ? (t.image_paths || []) : [];
+  _tplNewFiles = [];
+  document.getElementById('tpl-modal-title').textContent = t ? 'Editar plantilla' : 'Nueva plantilla';
+  document.getElementById('tf-name').value = t ? t.name : '';
+  document.getElementById('tf-text').value = t ? t.text : '';
+  document.getElementById('tf-images').value = '';
+  updateTemplateCharCount();
+  renderTemplateImagePreviews();
+  document.getElementById('template-modal-bg').style.display = 'flex';
+}
+
+function closeTemplateModal() {
+  document.getElementById('template-modal-bg').style.display = 'none';
+}
+
+function updateTemplateCharCount() {
+  document.getElementById('tf-char-count').textContent =
+    document.getElementById('tf-text').value.length;
+}
+
+function handleTemplateImagesChange() {
+  const input = document.getElementById('tf-images');
+  for (const f of input.files) {
+    const key = `${f.name}|${f.size}|${f.lastModified}`;
+    if (!_tplNewFiles.some(x => `${x.name}|${x.size}|${x.lastModified}` === key))
+      _tplNewFiles.push(f);
+  }
+  const total = _tplExistingPaths.length + _tplNewFiles.length;
+  if (total > 5) _tplNewFiles = _tplNewFiles.slice(0, 5 - _tplExistingPaths.length);
+  input.value = '';
+  renderTemplateImagePreviews();
+}
+
+function renderTemplateImagePreviews() {
+  const container = document.getElementById('tf-image-previews');
+  const existing = _tplExistingPaths.map((p, i) => ({
+    src: `/admin/uploaded-images/${p.split(/[\\/]/).pop()}`, idx: i,
+  }));
+  const newOnes = _tplNewFiles.map((f, i) => ({
+    src: URL.createObjectURL(f), idx: _tplExistingPaths.length + i,
+  }));
+  const items = [...existing, ...newOnes];
+  container.innerHTML = items.map(it =>
+    `<div class="tf-img-item">
+       <img src="${it.src}" alt="">
+       <span class="tf-img-idx">${it.idx + 1}/${items.length}</span>
+       <button class="tf-img-rm" onclick="removeTemplateImage(${it.idx})">×</button>
+     </div>`
+  ).join('');
+}
+
+function removeTemplateImage(idx) {
+  const n = _tplExistingPaths.length;
+  if (idx < n) _tplExistingPaths.splice(idx, 1);
+  else _tplNewFiles.splice(idx - n, 1);
+  renderTemplateImagePreviews();
+}
+
+async function uploadTemplateFiles() {
+  if (!_tplNewFiles.length) return [];
+  const fd = new FormData();
+  _tplNewFiles.forEach(f => fd.append('image', f));
+  const res = await fetch('/admin/api/upload-images', { method: 'POST', body: fd, credentials: 'same-origin' });
+  const data = await res.json();
+  return res.ok ? (data.image_paths || []) : [];
+}
+
+async function saveTemplate() {
+  const name = document.getElementById('tf-name').value.trim();
+  const text = document.getElementById('tf-text').value.trim();
+  if (name.length < 2) { toast('El nombre debe tener al menos 2 caracteres', true); return; }
+  if (text.length < 10) { toast('El texto debe tener al menos 10 caracteres', true); return; }
+  const uploadedPaths = await uploadTemplateFiles();
+  const allPaths = [..._tplExistingPaths, ...uploadedPaths];
+  const method = _tplEditing ? 'PUT' : 'POST';
+  const url    = _tplEditing ? `/admin/api/templates/${_tplEditing}` : '/admin/api/templates';
+  const { ok, data } = await api(method, url, { name, text, image_paths: allPaths });
+  if (!ok) { toast(data.error || 'Error al guardar plantilla', true); return; }
+  closeTemplateModal();
+  toast('✅ Plantilla guardada');
+  loadTemplates();
+}
+
+async function deleteTemplate(id, name) {
+  if (!confirm(`¿Eliminar la plantilla "${name}"?`)) return;
+  const { ok, data } = await api('DELETE', `/admin/api/templates/${id}`);
+  if (ok) { toast('Plantilla eliminada'); loadTemplates(); }
+  else toast(data.error || 'Error al eliminar', true);
+}
 
 // ─── Login manual ─────────────────────────────────────────────────────────
 async function triggerLogin(accountName, btn) {
