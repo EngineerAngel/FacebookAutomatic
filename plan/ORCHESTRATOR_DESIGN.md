@@ -137,6 +137,39 @@ El orquestador **siempre** vive en el proceso que tiene Chromiums abiertos (el w
 
 Los estados `BANNED` y `COOLDOWN` del diseño original se unifican en `RESTRICTED` (driven by health_score < umbral).
 
+**Comportamiento al detectar RESTRICTED durante publicación:**
+El poster termina el grupo que está publicando en ese momento y para. No continúa con los grupos restantes del job. Los grupos no publicados se marcan como `skipped` en `job_results`. Se notifica al admin y se dispara `webhook.fire_account_banned`.
+
+### 2.4 Modelo de navegadores y proxies
+
+El pool tiene **hasta 4 navegadores**. Cada navegador pertenece a **una sola cuenta** durante toda la vida de la sesión. Las cuentas **nunca migran** entre navegadores.
+
+```
+Navegador 1 │ elena  │ proxy de elena  (asignado por proxy_manager)
+Navegador 2 │ maria  │ proxy de maria
+Navegador 3 │ (libre)│ —
+Navegador 4 │ (libre)│ —
+```
+
+**Reglas de asignación:**
+
+Si llega un job para `cuenta X`:
+- `cuenta X` ya tiene sesión activa → se usa esa sesión (sin importar su estado IDLE/PUBLISHING/LOGGING_IN)
+- `cuenta X` no tiene sesión, hay espacio en el pool → se crea una sesión nueva
+- `cuenta X` no tiene sesión, pool lleno → job queda en `queued` hasta que se libere un navegador
+
+Las cuentas **no migran entre navegadores** — si la sesión fue eviccionada, el próximo job abre una sesión nueva desde cero (no hereda el browser anterior).
+
+**Evicción LRU:** sólo aplica a sesiones en estado `IDLE`. Nunca se interrumpe `PUBLISHING` o `LOGGING_IN`. Si el pool está lleno y todas las sesiones activas son `PUBLISHING` o `LOGGING_IN`, el dispatcher espera y el job queda en `queued`.
+
+**Proxy por cuenta — proxy_manager sin cambios:**
+
+El proxy va con la cuenta, no con el navegador. Al crear una sesión para `elena`, el orchestrator llama `proxy_manager.resolve_proxy(elena)` que retorna el proxy asignado por LRU. `proxy_manager` no se modifica — MAX_ACCOUNTS_PER_NODE=10 y asignación LRU siguen funcionando igual.
+
+**Modo de ventanas — siempre headed:**
+
+El orquestador corre siempre con ventanas visibles (`headless=False`). Emunium requiere escritorio activo y funciona en todas las acciones de publicación y Like. `window_layout.py` posiciona las ventanas automáticamente según el número de sesiones activas. Si en el futuro se migra a un servidor VPS sin GUI, se revisita esta decisión y se añade flag `HEADLESS`.
+
 ---
 
 ## 3. Health Score y Tiers (reemplaza rotación 4h)
@@ -211,26 +244,143 @@ LIMIT 1
 
 Si la cuenta ya tiene un job en `running`, no se reclama otro. Esto cubre F4 sin perder persistencia: si el proceso muere, los jobs siguen en `pending` y se retoman al reiniciar.
 
-### 4.3 Reasignación automática para cuentas restringidas
+### 4.3 Detección de duplicados
+
+Antes de encolar un job, el dispatcher verifica si ya existe un job pendiente o running que publique en el mismo grupo.
+
+**Caso A — misma cuenta + mismo grupo:**
+```
+Job existente: elena → grupo "ventas" (pendiente o running)
+Job nuevo:     elena → grupo "ventas"
+→ Se DESCARTA el job nuevo. Notificación al admin.
+```
+
+**Caso B — mismo grupo, diferente cuenta:**
+```
+Job existente: elena → grupo "ventas" (pendiente o running)
+Job nuevo:     maria → grupo "ventas"
+→ Se AVISA al admin: "elena tiene pendiente publicar en 'ventas' a las HH:MM"
+→ El job de maria se ENCOLA normalmente — no se descarta.
+```
+
+**Caso C — misma cuenta, diferente grupo:**
+```
+Job existente: elena → grupo "ventas"
+Job nuevo:     elena → grupo "deportes"
+→ Se encola en la cola de elena sin notificación. No es duplicado.
+```
+
+### 4.4 Modelo de bloques — agenda del orquestador
+
+El orquestador no gestiona jobs uno por uno en tiempo real. Trabaja con **bloques de tiempo** — agrupaciones de publicaciones que ocurren en una ventana horaria.
+
+```
+Bloque 8:30:
+  elena  (HOT)  → publica
+  maria  (WARM) → publica
+  pedro  (COLD) → consume contenido en navegador libre
+  juan   (RESTR)→ sin sesión, cooldown activo
+
+  Duración estimada = max_grupos × (wait_between_groups_max + consume_between_groups_max)
+```
+
+**Jobs on-demand** (sin hora programada) se insertan en el **próximo bloque disponible** dentro de `active_hours`. El orquestador calcula si el job cabe en el tiempo restante del bloque actual o va al siguiente.
+
+**Respuesta al admin cuando pide un slot:**
+- `"Tengo espacio"` — hay hueco en el bloque actual o el próximo
+- `"Tengo todo lleno"` — todos los bloques dentro de `active_hours` están completos
+- `"Tengo un espacio vacío a las HH:MM"` — próximo bloque con capacidad disponible
+
+**Cuentas COLD en bloques:**
+- Se excluyen de publicar → admin recibe notificación
+- Se asignan al navegador libre para consumo de contenido (idle browsing)
+- El orquestador prioriza la cuenta COLD con score más cercano a 50 (la que está a punto de recuperarse)
+- Cuando cruza a WARM, el admin recibe: `"pedro recuperó WARM — disponible para publicar"`
+
+### 4.5 Jobs en espera — sistema lleno (estado `queued`)
+
+Cuando todos los navegadores están ocupados (todos en `PUBLISHING` o `LOGGING_IN`):
+
+```
+Dispatcher detecta: sin navegadores disponibles
+        ↓
+Job queda en estado 'queued' (no 'running', no 'pending')
+        ↓
+Notificación al admin: "Sistema lleno — job X en espera"
+        ↓
+Cuando se desocupa un navegador:
+  ¿La cuenta está dentro de active_hours?
+    Sí → ejecuta inmediatamente
+    No → espera al siguiente día dentro de active_hours
+```
+
+**Estado `queued`:** el job no se marca como `running` hasta que el orquestador tiene un navegador disponible Y la cuenta está en horario activo. Esto evita jobs huérfanos si el proceso muere mientras espera.
+
+**TTL de `queued`:** configurable via `QUEUED_TIMEOUT_HOURS` (default 4h). Si el job lleva más de `QUEUED_TIMEOUT_HOURS` en `queued` sin poder arrancar, vuelve a `pending` y el dispatcher lo reintenta en el próximo ciclo. El admin recibe aviso: `"Job X devuelto a pending — sistema ocupado por más de Xh"`.
+
+### 4.6 Cuentas restringidas — cancelación y notificación
 
 ```
 Job programado → cuenta = RESTRICTED
         ↓
-¿Hay otra cuenta del job con score >= 50 sin restricción?
-  Sí → reasignar al pool de runnable de ese job
-  No → posponer scheduled_for + 72h
+Health score cancela todos los jobs pendientes de esa cuenta
+        ↓
+Notificación al admin: "Cuenta X restringida — N jobs cancelados"
+Webhook: fire_account_banned() (ya existe)
 ```
 
-Si una cuenta sigue restringida tras 72h, se vuelve a posponer. Excepción: petición directa desde admin a esa cuenta — se intenta inmediato aunque esté en cooldown; si falla, reinicia ciclo.
-
-**Durante cooldown la cuenta sí puede ejecutar jobs de:**
+**Durante cooldown la cuenta sí puede ejecutar:**
 - Discovery de grupos (`group_discoverer`)
-- Idle browsing (no escribe, solo lee)
-- Cualquier flujo que no implique `publish`
+- Scroll y hover de feed (Playwright puro)
+- Reaccionar con Like (Emunium) — interacción normal, no causa restricción
+- Comentar con Gemini — ídem
+- Todo excepto `publish_to_all_groups`
+
+**Razonamiento:** las restricciones se originan por volumen de publicaciones, no por interacciones sociales. Like y comentar son comportamiento normal de usuario y ayudan a recuperar el health score más rápido.
 
 ---
 
 ## 5. Componentes nuevos y modificaciones
+
+### 5.0 Estructura de archivos — un archivo por responsabilidad
+
+`orchestrator_async.py` solo coordina — llama funciones de módulos externos pero no implementa lógica propia. Si una función tiene más de ~20 líneas de lógica interna, va a su propio archivo.
+
+| Archivo | Responsabilidad |
+|---------|----------------|
+| `orchestrator_async.py` | Coordinator: `SessionPool`, `BrowserSession`, `Orchestrator` |
+| `window_layout.py` | NUEVO: calcula posición y tamaño de ventanas según navegadores activos |
+| `account_health.py` | NUEVO (Fase A): health score, eventos, tiers |
+| `session_dispatch.py` | NUEVO (Fase D): dispatch, duplicados, estimación de tiempo, cola de espera |
+
+Esta regla aplica a todo lo que se implemente en el orquestador — ningún archivo crece sin límite.
+
+### 5.0.1 `window_layout.py` — NUEVO
+
+Calcula y aplica el layout de ventanas según el número de navegadores activos en el pool. El orquestador llama `apply_layout(sessions)` cada vez que crea o elimina una sesión.
+
+```
+1 navegador  → ventana completa (100%)
+2 navegadores → mitad izquierda + mitad derecha (50% cada uno)
+3 navegadores → dos columnas izquierda (25% c/u) + columna derecha completa (50%)
+4 navegadores → cuadrícula 2×2 (25% cada uno)
+```
+
+```python
+# window_layout.py
+def apply_layout(sessions: list[BrowserSession]) -> None:
+    """Recalcula y reposiciona todas las ventanas según cuántas sesiones hay."""
+    layouts = _get_layout(len(sessions))  # retorna lista de (x, y, w, h) normalizados
+    for session, (x, y, w, h) in zip(sessions, layouts):
+        session.poster.set_viewport(x, y, w, h)
+```
+
+**Emunium usa estas coordenadas** para calcular clics absolutos en pantalla. Al tener posiciones fijas y conocidas, los clics siempre van al lugar correcto aunque haya múltiples ventanas.
+
+**Cuándo se llama `apply_layout`:**
+- Al crear una nueva sesión en el pool
+- Al eliminar una sesión del pool (evicción o cierre)
+- Al arrancar el orquestador con sesiones ya existentes
 
 ### 5.1 `account_health.py` — NUEVO (Fase A)
 
@@ -340,24 +490,11 @@ class Orchestrator:
 
 **Lo que NO se cambia del poster:** `login()`, `publish_to_all_groups()`, `_is_logged_in()`. Existen y funcionan; el orquestador las consume tal cual.
 
-### 5.4 `worker_core.py` — branch condicional (Fase D)
+### 5.4 `worker_main.py` — branch condicional (Fase D)
 
-```python
-async def run_job_orchestrated(job_id, accounts, text, image_paths, callback_url):
-    """Variante async que delega al orquestador. Llamada cuando ORCHESTRATOR_ENABLED."""
-    # NO adquiere account_locks — el orquestador maneja la cola por cuenta
-    # NO crea AsyncAccountManager — el orquestador reutiliza sesiones
-    await orchestrator.dispatch({
-        "id": job_id,
-        "accounts": accounts,
-        "text": text,
-        "image_paths": image_paths,
-        "callback_url": callback_url,
-    })
-    # mark_done / webhook se disparan desde dentro del orquestador al terminar
-```
+`worker_core.run_job` (legacy) se mantiene intacto. Cuando `ORCHESTRATOR_ENABLED=1`, tanto los jobs inmediatos como los jobs programados van al orquestador — sin tocar `scheduler_runner.py`.
 
-`run_job` (legacy) se mantiene intacto. La elección entre rutas es del worker poll loop:
+**Jobs inmediatos** (`_poll_loop`):
 
 ```python
 # en worker_main._poll_loop
@@ -366,6 +503,23 @@ if CONFIG.get("orchestrator_enabled"):
 else:
     executor.submit(worker_core.run_job, ...)  # ruta actual
 ```
+
+**Jobs programados** (`scheduler_runner`):
+
+`scheduler_runner._loop()` llama `dispatch_fn(_run_scheduled_job, job)`. Cuando el orquestador está activo, `worker_main` pasa una función que ignora `_run_scheduled_job` y despacha directamente al orquestador:
+
+```python
+# worker_main.main() — Fase D
+if CONFIG.get("orchestrator_enabled"):
+    def _scheduled_via_orchestrator(fn, job):
+        # fn = _run_scheduled_job — ignorado. El orquestador gestiona el job.
+        asyncio.run_coroutine_threadsafe(orchestrator.dispatch(job), loop)
+    scheduler_runner.start(dispatch_fn=_scheduled_via_orchestrator)
+else:
+    scheduler_runner.start(dispatch_fn=executor.submit)  # comportamiento actual
+```
+
+`loop` es el event loop principal, capturado en el closure al crear el orquestador (Fase D gestiona el loop explícitamente). `scheduler_runner.py` no se modifica.
 
 ### 5.5 `api_server.py` — endpoints nuevos (Fase F)
 
@@ -378,13 +532,14 @@ else:
 ### 5.6 `config.py` — flags nuevas
 
 ```python
-"orchestrator_enabled":  os.getenv("ORCHESTRATOR_ENABLED", "0").strip() == "1",
-"pool_max_total":        int(os.getenv("POOL_MAX_TOTAL", "4")),
+"orchestrator_enabled":     os.getenv("ORCHESTRATOR_ENABLED", "0").strip() == "1",
+"pool_max_total":           int(os.getenv("POOL_MAX_TOTAL", "4")),
 "session_max_idle_seconds": int(os.getenv("SESSION_MAX_IDLE_SECONDS", "1800")),
+"queued_timeout_hours":     int(os.getenv("QUEUED_TIMEOUT_HOURS", "4")),
 "consume_between_groups_min": int(os.getenv("CONSUME_BETWEEN_GROUPS_MIN", "120")),
 "consume_between_groups_max": int(os.getenv("CONSUME_BETWEEN_GROUPS_MAX", "300")),
-"consume_group_feed_min": int(os.getenv("CONSUME_GROUP_FEED_MIN", "15")),
-"consume_group_feed_max": int(os.getenv("CONSUME_GROUP_FEED_MAX", "45")),
+"consume_group_feed_min":   int(os.getenv("CONSUME_GROUP_FEED_MIN", "15")),
+"consume_group_feed_max":   int(os.getenv("CONSUME_GROUP_FEED_MAX", "45")),
 # Tiers e idle: hard-coded en config.py (no env), porque son comportamiento, no infra
 ```
 
@@ -393,6 +548,11 @@ else:
 ```sql
 ALTER TABLE accounts ADD COLUMN health_score INTEGER NOT NULL DEFAULT 80;
 ALTER TABLE accounts ADD COLUMN restricted_until TEXT;  -- ISO timestamp o NULL
+
+-- Estado 'queued': job reclamado por el orquestador pero esperando navegador o active_hours
+-- Flujo: pending → queued → running → done/failed
+-- Sin orquestador: pending → running (flujo original sin cambios)
+ALTER TABLE jobs ADD COLUMN queued_at TEXT;  -- timestamp cuando entró a queued, NULL si no aplica
 
 CREATE TABLE IF NOT EXISTS account_health_events (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -517,13 +677,20 @@ Cuando `ORCHESTRATOR_ENABLED=0`, `worker_core.run_job` (legacy con threading) si
 |-----------|----------------|
 | Worker muere con jobs en `PUBLISHING` | `mark_running_as_interrupted()` al reiniciar (ya existe) |
 | Sesión Chromium crashea (F5) | `health_ping()` detecta → marca sesión `CLOSING`, jobs en curso → `failed` |
-| Crash entre `claim_pending_job` y `dispatch` | Job queda `running` → próximo arranque lo marca `interrupted` |
+| Worker muere con jobs en `queued` | Al reiniciar, jobs `queued` vuelven a `pending` — el orquestador los reclama de nuevo |
+| Job en espera por `active_hours` | Permanece en `queued` — seguro ante crash, se retoma al reiniciar dentro de horario |
 | `kill -9` | Chromiums quedan huérfanos en SO; cleanup al arranque (ver §7.4) |
+
+**Flujo correcto de estados de un job con orquestador:**
+```
+pending → (dispatcher verifica disponibilidad) → queued → (navegador libre + active_hours) → running → done/failed
+```
+El job nunca pasa de `pending` a `running` directamente cuando el orquestador está activo.
 
 ### 7.3 Recursos
 
 - 4 Chromiums simultáneos × ~400 MB = ~1.6 GB RAM
-- 1 proxy SOCKS5 por cuenta (no compartido — bloquea multi-context)
+- Proxy por cuenta vía `proxy_manager` (hasta 10 cuentas por nodo, comportamiento actual sin cambios)
 - CPU: picos durante publish + idle action; mayormente quieto
 
 ### 7.4 Arranque limpio
@@ -532,7 +699,7 @@ Al iniciar el worker con orquestador activo:
 
 1. `mark_running_as_interrupted()` (ya existe)
 2. `cleanup_orphan_chromiums()` (nuevo, Fase D) — mata cualquier proceso `chrome.exe` con working dir en `browser_profiles/` del proyecto
-3. Sesiones se crean **escalonadas** (1 cada 30-60s) — evita saturar y patrón sospechoso
+3. Sesiones se crean según demanda del modelo de bloques — las cuentas con publicaciones más tempranas en el día arrancan primero. No hay escalonamiento fijo.
 
 ### 7.5 Graceful shutdown
 

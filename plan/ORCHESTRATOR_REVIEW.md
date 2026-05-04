@@ -142,8 +142,9 @@ async def _health_check_loop(self) -> None:
 
 # en BrowserSession
 async def health_ping(self) -> bool:
-    if self.state == SessionState.PUBLISHING:
-        return True  # no interrumpir publicación con ping
+    # Sin excepción de estado — se hace ping siempre.
+    # Si el Chromium está vivo puede responder aunque esté publicando o en login.
+    # Si no responde en cualquier estado, es un crash real.
     try:
         await asyncio.wait_for(self.poster.page.title(), timeout=5)
         return True
@@ -320,35 +321,30 @@ Razones:
 ### Arranque del sistema
 
 - **Limpio siempre** — `cleanup_orphan_chromiums()` mata cualquier Chromium del proyecto al iniciar
-- Sesiones iniciales creadas **escalonadas** (1 cada 30-60s, configurable)
+- Sesiones se crean según demanda del modelo de bloques — las cuentas con publicaciones más tempranas en el día arrancan primero. Sin escalonamiento fijo.
 - `mark_running_as_interrupted()` (ya existe) limpia jobs huérfanos en SQLite
 
 ### Jobs cuando no hay sesión disponible
 
 - Si la cuenta no tiene sesión y el pool puede crecer: crear sesión (login asíncrono)
-- Si el pool está lleno: esperar 30s e intentar `evict_idle_lru` — nunca forzar
-- El job permanece en `pending` en SQLite mientras espera
+- El job queda en estado `queued` (no `running`) mientras espera navegador o `active_hours`
+- Si el pool está lleno y el tiempo estimado supera el umbral: notifica admin, job permanece en `queued`
+- Evicción LRU solo sobre sesiones `IDLE` — nunca sobre `PUBLISHING` o `LOGGING_IN`
 
 ### Jobs programados con cuenta RESTRINGIDA
 
 ```
 Job programado → cuenta = RESTRICTED
         ↓
-¿El job admite reasignación (campo `account_pool` en lugar de `accounts`)?
-  Sí → escoger otra cuenta del pool con score >= 50
-  No → posponer scheduled_for + 72h, registrar evento
-
-Si tras 72h sigue restringida:
-  → Nuevo intento de reasignación o postergación
-  → Ciclo se repite hasta resolverse
-
-Excepción admin: petición directa a esa cuenta intenta inmediato
-  Si falla → reinicia ciclo de 72h
+Health score cancela todos los jobs pending y queued de esa cuenta
+        ↓
+Notificación al admin: "Cuenta X restringida — N jobs cancelados"
+Webhook: fire_account_banned() (ya existe)
 ```
 
 **Durante cooldown la cuenta puede ejecutar:**
 - Discovery de grupos (no escribe)
-- Idle browsing (lee feed)
+- Idle browsing en navegador libre (consume contenido para recuperar score)
 - Cualquier flujo no-publish
 
 ### Tier derivado del health score
@@ -439,6 +435,158 @@ Registrado en **dos lugares:**
 
 ---
 
-## 10. Plan abierto
+## 10. Fallos observados en el sistema actual (pre-orquestador)
+
+> Estos fallos existen hoy, independientemente del orquestador. Se documentan aquí para tenerlos presentes al diseñar las soluciones en Fases C y D.
+
+### FA-1 — Archivo `.lock` no se elimina si Chromium crashea
+
+`close()` intenta cerrar `context` y `_pw` antes de eliminar el `.lock`. Si el Chromium ya murió, las dos primeras líneas lanzan excepción y `lock_file.unlink()` nunca se ejecuta.
+
+```python
+async def close(self):
+    await self.context.close()   # ← falla si Chromium está muerto
+    await self._pw.stop()        # ← también falla
+    lock_file.unlink()           # ← nunca llega aquí
+```
+
+**Consecuencia:** Al reiniciar el worker, el perfil tiene `.lock` activo y puede rechazar abrir ese perfil de navegador.
+
+**Solución en Fase C:** mover `lock_file.unlink()` a un bloque `finally` independiente dentro de `close()`.
+
+---
+
+### FA-2 — Sin timeout global en `asyncio.run(mgr.run())`
+
+Si el Chromium se congela (no crashea, solo deja de responder), no lanza excepción. El thread queda esperando indefinidamente. El job permanece en estado `running` hasta que el proceso muere.
+
+**Consecuencia:** jobs zombie que bloquean la cuenta indefinidamente.
+
+**Solución en Fase D:** `asyncio.wait_for(mgr.run(), timeout=CONFIG["job_timeout_seconds"])`.
+
+---
+
+### FA-3 — El sistema tarda en detectar un navegador cerrado manualmente
+
+**Observado en producción:** al cerrar el Chromium manualmente, el poster sigue intentando publicar. No se da cuenta de inmediato — continúa ejecutando operaciones en un navegador que ya no existe.
+
+**Por qué tarda:** cada operación (`wait_for`, `locator`, `fill`) tiene su propio timeout (10-20s). El sistema espera ese timeout completo antes de lanzar excepción. Con varios reintentos en `AdaptivePlaywrightBridge`, puede acumular varios minutos antes de propagar el error.
+
+**Al final sí falla y marca el job como `failed`** — pero el tiempo perdido es significativo y el log muestra actividad en un navegador muerto.
+
+**Solución en Fase D:** el health-ping daemon (F5) detecta el navegador caído en el próximo ciclo de 30s y fuerza el cierre sin esperar los timeouts de cada operación.
+
+---
+
+### FA-4 — Sin detección proactiva de navegador caído
+
+No existe ningún proceso que verifique si los Chromiums siguen vivos entre operaciones. La detección actual es **reactiva** — solo se sabe que el navegador murió cuando una operación específica falla.
+
+El health-ping del orquestador (F5) convierte esto en **detección proactiva** cada 30s.
+
+---
+
+## 11. Plan abierto
 
 Todas estas decisiones pueden revisarse con evidencia de producción. Sin decisiones irreversibles. Si durante la implementación de cualquier fase se encuentra un conflicto no documentado: pausar, reportar, esperar confirmación antes de continuar.
+
+---
+
+## 12. Decisiones de revisión — Mayo 2026
+
+Resultado de la sesión de revisión crítica antes de implementar. Cada decisión reemplaza o complementa lo que estaba en el diseño original.
+
+### 12.1 Estados de job con orquestador activo
+
+El job **no se marca `running` hasta que hay navegador disponible Y la cuenta está en `active_hours`**. Se agrega el estado `queued` entre `pending` y `running`.
+
+```
+pending → queued → running → done / failed
+```
+
+Sin orquestador (`ORCHESTRATOR_ENABLED=0`): el flujo actual `pending → running` no cambia.
+
+### 12.2 Modelo de navegadores y proxies
+
+4 navegadores fijos, cada uno con proxy SOCKS5 dedicado y grupo de cuentas. Las cuentas pueden moverse entre navegadores si hay espacio. Evicción LRU sólo sobre sesiones `IDLE` — nunca sobre `PUBLISHING` o `LOGGING_IN`.
+
+### 12.3 Estimación de tiempo
+
+Estimación pesimista usando máximos del config:
+```python
+tiempo_por_grupo = wait_between_groups_max + consume_between_groups_max
+tiempo_estimado  = n_grupos_pendientes * tiempo_por_grupo
+```
+Umbral para buscar otro navegador: **15 minutos**.
+
+### 12.4 Jobs en espera — sistema lleno
+
+- Job queda en `queued`, no se descarta
+- Admin recibe notificación "Sistema lleno"
+- Al desocuparse navegador: ejecuta sólo si la cuenta está en `active_hours`
+- Si no está en horario activo: espera al siguiente día dentro de `active_hours`
+
+### 12.5 Detección de duplicados
+
+| Caso | Acción |
+|------|--------|
+| Misma cuenta + mismo grupo | DESCARTA job nuevo + notifica admin |
+| Mismo grupo, diferente cuenta | Avisa admin, encola normalmente |
+| Misma cuenta, diferente grupo | Encola sin notificación |
+
+### 12.6 Health score + orquestador
+
+El health score actúa como monitor independiente. Al detectar que una cuenta pasa a `RESTRICTED`:
+1. Cancela todos sus jobs `pending` y `queued`
+2. Si está publicando: termina el grupo actual y para (no continúa con grupos restantes)
+3. Notifica al admin en el panel web
+
+> **Webhook a OpenClaw (`fire_account_banned`):** pendiente — OpenClaw en mantenimiento. Prioridad actual es notificación en panel admin únicamente. Retomar cuando OpenClaw esté activo.
+
+### 12.7 Modelo de bloques — reemplaza escalonamiento
+
+El orquestador trabaja con bloques de tiempo, no con jobs individuales en tiempo real. Las publicaciones se planifican con antelación — al arrancar el sistema ya sabe qué va a pasar en cada bloque.
+
+Jobs on-demand → se insertan en el próximo bloque disponible dentro de `active_hours`.
+
+**Uso de navegadores en un bloque:**
+- Cuentas HOT/WARM → publican
+- Cuentas COLD → consumen contenido en navegadores libres (idle browsing para recuperar score)
+- Cuentas RESTRICTED → sin sesión, en cooldown
+
+**Priorización de cuentas COLD para navegadores libres:** score más cercano a 50 primero — las que están a punto de recuperarse tienen prioridad para usar el navegador y volver a WARM antes.
+
+### 12.8 Emunium lock — acciones idle son Playwright puro
+
+Las acciones de idle (scroll, hover, abrir comentarios) usan **Playwright puro** — sin Emunium, sin mouse físico. Solo dos acciones adquieren el `_emunium_lock`:
+- HOT publicando (`publish()`)
+- COLD/WARM reaccionando con Like (`_react_to_random_post_async`)
+
+Esto permite que N sesiones hagan idle simultáneamente sin conflicto de cursor.
+
+### 12.9 Layout de ventanas — automático al cambiar el pool
+
+El orquestador recalcula y reposiciona todas las ventanas cada vez que el pool cambia (sesión creada o eliminada). La lógica vive en `window_layout.py` (archivo separado).
+
+```
+1 navegador  → pantalla completa
+2 navegadores → 50% izquierda / 50% derecha
+3 navegadores → 25% + 25% izquierda / 50% derecha
+4 navegadores → cuadrícula 2×2 (25% cada uno)
+```
+
+Emunium usa estas posiciones fijas para calcular coordenadas absolutas de clic.
+
+### 12.10 Filosofía de archivos
+
+Un archivo por responsabilidad. `orchestrator_async.py` solo coordina — no implementa lógica propia de más de ~20 líneas. Lo que crece va a su propio módulo. Aplica a todo lo que se implemente.
+
+### 12.11 Verificación de login — una vez al inicio
+
+La verificación `_is_logged_in()` se llama **una sola vez** antes de `publish_to_all_groups()`, desde `BrowserSession.publish_job()` en el orquestador — no dentro del poster.
+
+Verificar antes de cada grupo agregaría hasta 60s de overhead por job (5 grupos × 12s). Si la sesión expira entre grupos, el `publish()` falla normalmente y el error queda en `job_results`. Ver detalles en [POSTER_FLOW.md](POSTER_FLOW.md) §3.1.
+
+### 12.12 Poll loop ya es async
+
+`worker_main._poll_loop` ya es `async def` y se ejecuta con `asyncio.run()`. El `await orchestrator.dispatch(job)` funciona sin cambios estructurales. El dispatch es **fire-and-forget** — lanza una `asyncio.Task` y retorna. El orquestador es responsable de marcar el job como `done`/`failed` y disparar el webhook al terminar.
